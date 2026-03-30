@@ -1,0 +1,75 @@
+# Python
+venv/
+.venv/
+env/
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# PDM
+.pdm-python
+__pypackages__/
+pdm.lock
+
+# Testing
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Alembic
+# Keep versions/ tracked, but ignore generated artifacts
+*.pyc
+
+# Env & Secrets
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+logs/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+._*
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+.AppleDB
+.AppleDesktop
+Network Trash Folder
+Temporary Items
+.apdisk
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Antigravity Agents / Skills
+!.agents/
+
+# Dev / one-off scripts (moved to /scripts at repo root)
+check_db.py
+check_forms.py
+check_explore.py
+read_excel.py
+extract_pdf.py
+inspect_*.py
+update_db_schema.py
+verify_profile_settings.py
+pdf_content.txt
