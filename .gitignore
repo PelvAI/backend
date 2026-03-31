@@ -61,7 +61,7 @@ Temporary Items
 *.swo
 
 # Antigravity Agents / Skills
-!.agents/
+.agents/
 
 # Dev / one-off scripts (moved to /scripts at repo root)
 check_db.py
