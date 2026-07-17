@@ -60,16 +60,18 @@ Temporary Items
 *.swp
 *.swo
 
-# Antigravity Agents / Skills
+# Antigravity Agents / Skills / Metadata
 .agents/
+.pytest_cache/
 
-# Dev / one-off scripts (moved to /scripts at repo root)
-check_db.py
-check_forms.py
-check_explore.py
-read_excel.py
-extract_pdf.py
-inspect_*.py
-update_db_schema.py
-verify_profile_settings.py
+# Dev / Scratch / Temporary
+scratch/
 pdf_content.txt
+check_*.py
+extract_*.py
+inspect_*.py
+read_*.py
+verify_*.py
+update_db_schema.py
+*.db
+*.sqlite

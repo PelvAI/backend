@@ -26,7 +26,7 @@ async def test_login_and_get_me(client: AsyncClient):
 @pytest.mark.asyncio
 async def test_get_gamification_stats(client: AsyncClient):
     # Setup user
-    login_data = {"firebase_uid": "gamer_1", "email": "gamer@pelvia.com"}
+    login_data = {"firebase_uid": "gamer_1", "email": "gamer@vela.com"}
     await client.post("/api/v1/auth/login", json=login_data)
     
     headers = {"Authorization": "Bearer gamer_1"}

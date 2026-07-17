@@ -30,7 +30,7 @@ import os
 def get_url():
     url = os.getenv("DATABASE_URL")
     if not url:
-        url = "postgresql+asyncpg://pelvia:pelvia_secret@localhost:5432/pelvia_db"
+        url = "postgresql+asyncpg://alma:alma_secret@127.0.0.1:5433/alma_db"
     return url
 
 def run_migrations_offline() -> None:

@@ -35,10 +35,15 @@ class TagAutomationService:
         # 4. Map codes to Target objects
         desired_targets = []
         for code in desired_codes:
-            if code in all_targets:
-                desired_targets.append(all_targets[code])
-            elif code == "TODAS" and "todas" in all_targets: # handle case sensitivity
-                desired_targets.append(all_targets["todas"])
+            # Try to find target case-insensitively
+            target = all_targets.get(code.upper())
+            if target:
+                desired_targets.append(target)
+            elif code.lower() == "todas":
+                # Fallback for "todas" if not found by upper (though it should be in all_targets as "TODAS")
+                # Wait, if t.code is "todas" in DB, it will be "TODAS" in all_targets.
+                # So all_targets.get("TODAS") should have worked.
+                pass
 
         # 5. Update collection (SQLAlchemy handles the join table)
         profile.targets = desired_targets

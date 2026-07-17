@@ -34,9 +34,6 @@ async def list_forms(
     # 1. Ensure user tags are synced (Temporal Logic)
     if current_user.profile:
         await TagAutomationService.sync_profile_tags(db, current_user.profile.profile_id)
-        # Refresh user to get updated targets if needed, 
-        # though sync_profile_tags might be enough.
-        # For filtering, we'll use the Profile.targets collection.
         await db.refresh(current_user.profile, ["targets"])
 
     # 2. Build query
@@ -51,16 +48,23 @@ async def list_forms(
     )
     
     # 3. Apply Filtering
+    from sqlalchemy import or_
+    
+    # Always allow forms with "todas" target (case-insensitive) OR forms with NO targets assigned
+    filter_conditions = [
+        ClinicalForm.targets.any(Target.code.ilike("todas")),
+        ~ClinicalForm.targets.any() # Include forms with no targets
+    ]
+    
     if target:
         # Manual override via query param
-        query = query.where(ClinicalForm.targets.any(Target.code == target.upper()))
+        filter_conditions.append(ClinicalForm.targets.any(Target.code == target.upper()))
     elif current_user.profile and current_user.profile.targets:
         # Automatic filtering by user's clinical tags
         user_target_ids = [t.target_id for t in current_user.profile.targets]
-        query = query.join(ClinicalForm.targets).where(Target.target_id.in_(user_target_ids))
-    else:
-        # Fallback: only show "todas" forms (General Audience)
-        query = query.where(ClinicalForm.targets.any(Target.code == "todas"))
+        filter_conditions.append(ClinicalForm.targets.any(Target.target_id.in_(user_target_ids)))
+        
+    query = query.where(or_(*filter_conditions))
         
     result = await db.execute(query)
     # Remove duplicates from join if any

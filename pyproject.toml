@@ -1,9 +1,9 @@
 [project]
-name = "pelvia-api"
+name = "vela-api"
 version = "0.1.0"
-description = "PelvIA Backend API"
+description = "Vela Health Intelligence System API"
 authors = [
-    {name = "PelvIA Team", email = "dev@pelvia.com"},
+    {name = "Vela Team", email = "dev@vela.com"},
 ]
 dependencies = [
     "fastapi>=0.109.0",

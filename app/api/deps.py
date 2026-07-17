@@ -25,7 +25,12 @@ async def get_current_user(
     # In a real app, verify token here.
     # For dev, we treat the token as the firebase_uid directly.
     
-    result = await db.execute(select(User).where(User.firebase_uid == token))
+    from sqlalchemy.orm import selectinload
+    result = await db.execute(
+        select(User)
+        .where(User.firebase_uid == token)
+        .options(selectinload(User.profile))
+    )
     user = result.scalars().first()
     
     if not user:
