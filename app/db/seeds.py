@@ -22,9 +22,17 @@ async def seed_data():
         logger.info("🚀 Starting Master Seeding Process (Production Ready)...")
 
         # --- 1. CLEANUP ---
-        # Clear existing clinical definitions to ensure fresh state
+        # NOTA PARA EL SERVIDOR/PRODUCCIÓN:
+        # Se realiza una limpieza en cascada respetando las dependencias de llaves foráneas para evitar
+        # el error ForeignKeyViolationError. Correr este script en cualquier servidor vaciará estas tablas.
+        # Clear existing definitions in dependency order to ensure fresh state
+        await db.execute(delete(ClinicalSnapshot))
+        await db.execute(delete(Profile))
+        await db.execute(delete(Wallet))
+        await db.execute(delete(User))
         await db.execute(delete(ClinicalForm))
         await db.execute(delete(Target))
+        await db.execute(delete(Exercise))
         await db.commit()
 
         # --- 2. TARGETS (Segmentation) ---
@@ -143,8 +151,12 @@ async def seed_data():
             db.add(ex)
         
         # --- 5. TEST USER (Ana) ---
-        ana = User(firebase_uid="ana_test_123", email="ana@vela.com", is_active=True)
+        ana = User(firebase_uid="ana_test_123", email="ana@alma.com", is_active=True)
         db.add(ana)
+
+        # --- 6. DEFAULT TEST USER (test_uid_123) ---
+        test_user = User(firebase_uid="test_uid_123", email="test@alma.com", is_active=True)
+        db.add(test_user)
         await db.flush()
         
         profile = Profile(
@@ -152,6 +164,12 @@ async def seed_data():
             preferred_language="es", gender="female", birth_date=datetime(1992, 8, 20)
         )
         db.add(profile)
+        
+        profile_test = Profile(
+            user_id=test_user.user_id, nickname="Test", timezone="America/Argentina/Buenos_Aires", 
+            preferred_language="es", gender="female", birth_date=datetime(1995, 1, 1)
+        )
+        db.add(profile_test)
         
         # Historical Snapshots
         for i in range(4):

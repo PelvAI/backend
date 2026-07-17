@@ -4,9 +4,9 @@ from app.db.base import Base # Register all models
 from app.api.v1.api import api_router
 
 app = FastAPI(
-    title="Vela API",
+    title="ALMA API",
     version="1.0.0",
-    description="Backend API for Vela - Women's Health System"
+    description="ALMA Health Intelligence System — DOM 07 · SUELO · B2C & Platform"
 )
 
 # CORS Configuration

@@ -1,6 +1,6 @@
-# 🌸 Vela Backend API
+# ALMA — Backend API (DOM 07 · SUELO)
 
-Este es el servidor central de **Vela**, una plataforma DTx (Digital Therapeutics) especializada en salud pélvica. Proporciona el motor clínico, la gestión de planes de entrenamiento y el sistema de scoring para pacientes y profesionales.
+Servidor central de **ALMA Care**, el módulo B2C del sistema **ALMA Health Intelligence System**, enfocado en salud del suelo pélvico (DOM 07 — SUELO). Provee el motor clínico, evaluaciones estandarizadas y seguimiento de progreso para pacientes y profesionales.
 
 ## 🚀 Instalación Rápida
 
@@ -18,7 +18,7 @@ Este es el servidor central de **Vela**, una plataforma DTx (Digital Therapeutic
    ```
 
 3. **Configuración**:
-   Copia el archivo `.env.example` a `.env` y configura tus variables locales (DB_URL, etc.).
+   Copia el archivo `.env.example` a `.env` y configura tus variables locales.
 
 4. **Migraciones y Datos iniciales**:
    ```bash
@@ -29,14 +29,14 @@ Este es el servidor central de **Vela**, una plataforma DTx (Digital Therapeutic
 
 ## 🧪 Sistema de Semillas (Seeders)
 
-El script `app/db/seeds.py` es el encargado de dejar el sistema listo para usar. Realiza las siguientes acciones técnicas:
+El script `app/db/seeds.py` deja el sistema listo para usar. Realiza las siguientes acciones:
 
-1.  **Limpieza**: Elimina cualquier configuración clínica previa para evitar duplicados.
+1.  **Limpieza**: Elimina configuraciones clínicas previas para evitar duplicados.
 2.  **Targets**: Configura la segmentación clínica (Todas, Embarazadas, Post-parto, Menopausia, Deportista).
-3.  **Formularios Reales**: Carga las evaluaciones estándar de la industria:
+3.  **Formularios Clínicos Reales** (DOM 07 — SUELO):
     *   **ICIQ-SF**: Cuestionario internacional de incontinencia con scoring automático.
     *   **PFDI-20**: Inventario de disfunción pélvica (Sección POPDI-6).
-4.  **Entorno de Prueba**: Crea una usuaria de prueba (`ana@vela.com`) con un historial de 4 semanas de "Snapshots" clínicos para que las gráficas y el progreso sean visibles inmediatamente en la App.
+4.  **Entorno de Prueba**: Crea una usuaria de prueba (`ana@alma.com`) con historial de 4 semanas de snapshots clínicos para que gráficas y progreso sean visibles inmediatamente.
 
 ## 🛠️ Ejecución
 ```bash

@@ -6,13 +6,13 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     environment:
-      - POSTGRES_USER=vela
-      - POSTGRES_PASSWORD=vela_secret
-      - POSTGRES_DB=vela_db
+      - POSTGRES_USER=alma
+      - POSTGRES_PASSWORD=alma_secret
+      - POSTGRES_DB=alma_db
     ports:
       - "5432:5432"
     healthcheck:
-      test: [ "CMD-SHELL", "pg_isready -U vela -d vela_db" ]
+      test: [ "CMD-SHELL", "pg_isready -U alma -d alma_db" ]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -26,7 +26,7 @@ services:
     ports:
       - "8001:8001"
     environment:
-      - DATABASE_URL=postgresql+asyncpg://vela:vela_secret@db:5432/vela_db
+      - DATABASE_URL=postgresql+asyncpg://alma:alma_secret@db:5432/alma_db
       - SECRET_KEY=dev_secret_key_change_in_production
     depends_on:
       db:
