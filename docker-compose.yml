@@ -26,9 +26,17 @@ services:
       - .:/app
     ports:
       - "8001:8001"
+    extra_hosts:
+      # ChatBot (pelvai-app) publicado no host :8000
+      - "host.docker.internal:host-gateway"
     environment:
       - DATABASE_URL=postgresql+asyncpg://alma:alma_secret@db:5432/alma_db
       - SECRET_KEY=dev_secret_key_change_in_production
+      # Dentro do contentor, 127.0.0.1 não alcança o ChatBot no host
+      - CHATBOT_BASE_URL=http://host.docker.internal:8000
+      - CHATBOT_SERVICE_TOKEN=change-me-long-random-shared-secret-min-32-chars
+      - CHATBOT_TIMEOUT_SECONDS=120
+      - CHATBOT_REQUIRED=true
     depends_on:
       db:
         condition: service_healthy
