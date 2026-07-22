@@ -10,7 +10,8 @@ services:
       - POSTGRES_PASSWORD=alma_secret
       - POSTGRES_DB=alma_db
     ports:
-      - "5432:5432"
+      # Host 5433: evita conflito com pelvai-db (ChatBot) que já usa 5432
+      - "5433:5432"
     healthcheck:
       test: [ "CMD-SHELL", "pg_isready -U alma -d alma_db" ]
       interval: 5s

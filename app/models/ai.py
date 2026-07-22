@@ -26,6 +26,7 @@ class AIConversation(Base):
     conversation_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.user_id"))
     is_private = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     user = relationship("app.models.user.User", backref="conversations")
     messages = relationship("AIMessage", back_populates="conversation")
@@ -35,7 +36,9 @@ class AIMessage(Base):
     message_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     conversation_id = Column(UUID(as_uuid=True), ForeignKey("ai_conversations.conversation_id"))
     sender = Column(Enum(SenderType))
-    content_encrypted = Column(Text) # In a real app, this should be encrypted
+    content_encrypted = Column(Text)  # MVP: texto plano; encriptar com Fernet em produção
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    meta = Column(JSONB, nullable=True)
 
     conversation = relationship("AIConversation", back_populates="messages")
 
@@ -53,6 +56,7 @@ class AIOptimization(Base):
     type = Column(Enum(OptimizationType))
     predicted_value = Column(Float)
     reasoning = Column(Text)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=True)
 
     user = relationship("app.models.user.User", backref="optimizations")
     feedback = relationship("OptimizationFeedback", back_populates="optimization", uselist=False)
