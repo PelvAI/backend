@@ -36,6 +36,7 @@ services:
       - CHATBOT_BASE_URL=http://host.docker.internal:8000
       - CHATBOT_SERVICE_TOKEN=change-me-long-random-shared-secret-min-32-chars
       - CHATBOT_TIMEOUT_SECONDS=120
+      - CHATBOT_UPLOAD_TIMEOUT_SECONDS=600
       - CHATBOT_REQUIRED=true
     depends_on:
       db:
