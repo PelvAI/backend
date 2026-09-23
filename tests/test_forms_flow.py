@@ -1,17 +1,20 @@
 """
-Pruebas de caracterización del circuito de formularios clínicos.
+Pruebas del circuito de formularios clínicos.
 
-FASE 0 del plan de saneamiento. Estas pruebas fijan el comportamiento ACTUAL
-del sistema —bugs incluidos— para que al corregirlos se vea exactamente qué
-cambió y no se rompa nada por accidente.
+Nacieron en la fase 0 del plan de saneamiento como pruebas de caracterización:
+fijaban el comportamiento de entonces —bugs incluidos— para poder distinguir
+después un cambio deliberado de una regresión. A medida que las fases cierran
+hallazgos, las pruebas correspondientes se invierten y pasan a afirmar el
+comportamiento correcto.
 
-Dos categorías:
+Tres categorías:
 
   * CIRCUITO   — recorrido que debe seguir funcionando siempre. Si se pone en
                  rojo, algo se rompió.
-  * F<n>       — documenta un hallazgo de la auditoría. Al cerrar ese hallazgo
-                 la prueba DEBE invertirse: cada una dice abajo qué se espera
-                 que afirme una vez corregida.
+  * F<n> abierto  — documenta un hallazgo vigente. Su docstring dice qué debe
+                 afirmar una vez corregido.
+  * F<n> cerrado  — ya invertida. Su docstring dice en qué paso se cerró y
+                 queda como protección contra la regresión.
 """
 
 import uuid
@@ -736,3 +739,75 @@ async def test_un_codigo_activo_duplicado_sigue_siendo_rechazado(client, user):
     r = await client.post(f"{ADMIN}/forms", json={"code": code})
     assert r.status_code == 400
     assert "already exists" in r.json()["detail"]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# F33 · Una alerta sin tipo tumba el cierre de la evaluación
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+async def test_f33_una_regla_con_alerta_sin_tipo_rompe_el_cierre(client, user):
+    """
+    scoring.py hace `rule.alert_type or AlertType.INFO`, y ese miembro no
+    existe en el enum: solo hay DERIVACION_CLINICA, ACTIVAR_PLAN y SEGUIMIENTO.
+
+    El admin permite crear una regla con condición de alerta y sin tipo, así
+    que en cuanto esa alerta se dispara el cierre de la evaluación explota con
+    AttributeError. Es la funcionalidad central del motor clínico —generar
+    derivaciones— y está caída.
+
+    Al cerrar F33: el cierre debe completarse y persistir la alerta con un tipo
+    por defecto válido.
+    """
+    form_id, _ = await crear_formulario_iciq(client)
+
+    r = await client.post(
+        f"{ADMIN}/forms/{form_id}/rules",
+        json={
+            "variable_name": "alerta_sin_tipo",
+            "formula": "iciq_frecuencia",
+            "alert_condition": "alerta_sin_tipo >= 1",
+            "order_index": 1,
+        },
+    )
+    assert r.status_code == 201
+
+    r = await client.post(f"{CLIN}/submissions/start", json={"form_id": form_id})
+    sub_id = r.json()["submission_id"]
+
+    r = await client.get(f"{ADMIN}/forms/{form_id}")
+    preguntas = {
+        q["data_key"]: q["question_id"]
+        for s in r.json()["sections"]
+        for q in s["questions"]
+    }
+    await client.put(
+        f"{CLIN}/submissions/{sub_id}/answers",
+        json={"answers": [{"question_id": preguntas["iciq_frecuencia"], "value": "diario"}]},
+    )
+
+    with pytest.raises(AttributeError, match="AlertType.*INFO"):
+        await client.post(f"{CLIN}/submissions/{sub_id}/finalize")
+
+
+async def test_una_alerta_con_tipo_explicito_si_cierra(client, user):
+    """El mismo caso con tipo declarado funciona: aísla la causa a F33."""
+    form_id, _ = await crear_formulario_iciq(client)
+
+    r = await client.post(
+        f"{ADMIN}/forms/{form_id}/rules",
+        json={
+            "variable_name": "alerta_con_tipo",
+            "formula": "iciq_frecuencia",
+            "alert_condition": "alerta_con_tipo >= 1",
+            "alert_type": "derivacion_clinica",
+            "order_index": 1,
+        },
+    )
+    assert r.status_code == 201
+
+    _, sub = await responder(
+        client, form_id, {"iciq_frecuencia": "diario", "iciq_cantidad": "poca"}
+    )
+    assert sub["completed_at"] is not None
+    assert sub["calculated_values"]["alerta_con_tipo"] == 4
