@@ -662,3 +662,77 @@ async def test_f4_una_lista_vacia_limpia_los_segmentos(
     r = await client.put(f"{ADMIN}/forms/{form_id}", json={"target_ids": []})
     assert r.status_code == 200
     assert r.json()["targets"] == []
+
+
+async def test_un_segmento_inexistente_falla_en_vez_de_ignorarse(client, user):
+    """
+    Pedir un segmento que no existe y recibir un formulario sin segmento sería
+    la misma falla silenciosa que F1. El contrato explícito rechaza.
+    """
+    inexistente = str(uuid.uuid4())
+    r = await client.post(
+        f"{ADMIN}/forms",
+        json={"code": f"TEST_{uuid.uuid4().hex[:8].upper()}", "target_ids": [inexistente]},
+    )
+    assert r.status_code == 400
+    assert inexistente in r.json()["detail"]
+
+
+async def test_el_codigo_de_segmento_desconocido_no_tumba_al_editor(client, user):
+    """
+    La rama de compatibilidad es tolerante a propósito: el editor manda
+    `target: "todas"` por defecto y ese segmento puede no estar cargado. Fallar
+    ahí rompería el alta de formularios, que es justo lo que 1a evita.
+
+    Esta asimetría desaparece en 1c, cuando se elimine el campo.
+    """
+    r = await client.post(
+        f"{ADMIN}/forms",
+        json={"code": f"TEST_{uuid.uuid4().hex[:8].upper()}", "target": "NO_EXISTE"},
+    )
+    assert r.status_code == 201
+    assert r.json()["targets"] == []
+
+
+async def test_recrear_un_formulario_archivado_lo_reactiva(
+    client, user, target_embarazadas, db_session
+):
+    """
+    Crear con el código de un formulario archivado lo revive en lugar de
+    duplicarlo: conserva el form_id —y por lo tanto el histórico de
+    respuestas—, vuelve a borrador y reemplaza los segmentos.
+
+    El camino se reestructuró en 1a, así que conviene tenerlo cubierto.
+    """
+    otro = Target(code="POSTPARTUM", name="Post-parto", is_active=True)
+    db_session.add(otro)
+    await db_session.commit()
+
+    code = f"TEST_{uuid.uuid4().hex[:8].upper()}"
+    r = await client.post(
+        f"{ADMIN}/forms",
+        json={"code": code, "target_ids": [str(target_embarazadas.target_id)]},
+    )
+    form_id = r.json()["form_id"]
+
+    await client.delete(f"{ADMIN}/forms/{form_id}")
+
+    r = await client.post(
+        f"{ADMIN}/forms", json={"code": code, "target_ids": [str(otro.target_id)]}
+    )
+    assert r.status_code == 201
+    assert r.json()["form_id"] == form_id
+    assert r.json()["is_active"] is True
+    assert r.json()["status"] == "draft"
+    assert [t["code"] for t in r.json()["targets"]] == ["POSTPARTUM"]
+
+
+async def test_un_codigo_activo_duplicado_sigue_siendo_rechazado(client, user):
+    """La reestructuración de 1a no debe haber aflojado esta guarda."""
+    code = f"TEST_{uuid.uuid4().hex[:8].upper()}"
+    r = await client.post(f"{ADMIN}/forms", json={"code": code})
+    assert r.status_code == 201
+
+    r = await client.post(f"{ADMIN}/forms", json={"code": code})
+    assert r.status_code == 400
+    assert "already exists" in r.json()["detail"]

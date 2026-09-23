@@ -331,6 +331,11 @@ async def _resolve_targets(
     Devuelve siempre una lista, y resuelve ANTES de que haya objetos pendientes
     en la sesión: hacerlo después dispara un autoflush que persiste el
     formulario a medio construir y rompe la asignación de la colección (F27).
+
+    Un target_id inexistente es un error: pedir un segmento que no existe y
+    recibir un formulario sin segmento es la misma falla silenciosa que F1.
+    El código en singular, en cambio, se resuelve con tolerancia: es la rama de
+    compatibilidad y no debe tumbar al editor si el segmento no está cargado.
     """
     from app.models.clinical import Target
 
@@ -338,7 +343,15 @@ async def _resolve_targets(
         result = await db.execute(
             select(Target).where(Target.target_id.in_(target_ids))
         )
-        return list(result.scalars().all())
+        targets = list(result.scalars().all())
+
+        faltantes = set(target_ids) - {t.target_id for t in targets}
+        if faltantes:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Unknown target_ids: {sorted(str(t) for t in faltantes)}",
+            )
+        return targets
 
     if target_code:
         result = await db.execute(
