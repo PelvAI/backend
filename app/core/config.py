@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     chatbot_base_url: str = "http://127.0.0.1:8000"
     chatbot_service_token: str = ""
     chatbot_timeout_seconds: float = 120.0
+    chatbot_upload_timeout_seconds: float = 600.0
     chatbot_required: bool = True
 
 

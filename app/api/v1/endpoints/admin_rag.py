@@ -42,7 +42,9 @@ async def upload_rag_documents(
                 (f.filename, content, f.content_type or "application/octet-stream"),
             )
         )
-    async with httpx.AsyncClient(timeout=settings.chatbot_timeout_seconds) as http:
+    # Independente de chatbot_timeout_seconds (chat não deve herdar 600s).
+    timeout = settings.chatbot_upload_timeout_seconds
+    async with httpx.AsyncClient(timeout=timeout) as http:
         r = await http.post(
             f"{settings.chatbot_base_url.rstrip('/')}/admin/documents/upload",
             headers={"Authorization": f"Bearer {settings.chatbot_service_token}"},
