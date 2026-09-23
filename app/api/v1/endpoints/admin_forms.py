@@ -48,9 +48,11 @@ class OptionUpdate(BaseModel):
 class OptionResponse(BaseModel):
     option_id: UUID
     value: str
-    label_key: Optional[str]
+    label_key: Optional[str] = None
     score: int
-    context_rules: Optional[List[dict]]
+    # En Pydantic v2 un Optional sin default es obligatorio: sin el `= None`,
+    # cualquier construcción que omita el campo revienta con 500 (F26).
+    context_rules: Optional[List[dict]] = None
     order_index: int
     
     class Config:
@@ -172,6 +174,10 @@ class FormCreate(BaseModel):
     title_key: Optional[str] = None
     description_key: Optional[str] = None
     target_ids: List[UUID] = []
+    # TRANSICIÓN (fase 1): el editor todavía envía el código del segmento en
+    # singular. Se acepta para no romperlo mientras migra a target_ids; al
+    # completarse el paso 1c este campo se elimina y entra extra="forbid".
+    target: Optional[str] = None
     frecuencia: FrecuenciaType = FrecuenciaType.UNICA_VEZ
     disparador: DisparadorType = DisparadorType.AL_REGISTRO
 
@@ -181,6 +187,7 @@ class FormUpdate(BaseModel):
     description_key: Optional[str] = None
     status: Optional[FormStatus] = None
     target_ids: Optional[List[UUID]] = None
+    target: Optional[str] = None  # TRANSICIÓN (fase 1), ver FormCreate
     frecuencia: Optional[FrecuenciaType] = None
     disparador: Optional[DisparadorType] = None
 
@@ -260,9 +267,86 @@ async def list_targets(
     return result.scalars().all()
 
 
+@router.put("/targets/{target_id}", response_model=TargetResponse)
+async def update_target(
+    target_id: UUID,
+    target_in: TargetUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_admin)
+):
+    """Update a clinical target (segment)."""
+    from app.models.clinical import Target
+    target = await db.get(Target, target_id)
+    if not target:
+        raise HTTPException(status_code=404, detail="Target not found")
+
+    for field, value in target_in.model_dump(exclude_unset=True).items():
+        setattr(target, field, value)
+
+    await db.commit()
+    await db.refresh(target)
+    return target
+
+
+@router.delete("/targets/{target_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_target(
+    target_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_admin)
+):
+    """
+    Soft delete a target.
+
+    Se desactiva en lugar de borrarse: los formularios y perfiles que lo
+    referencian conservan el vínculo histórico, y list_targets ya filtra por
+    is_active.
+    """
+    from app.models.clinical import Target
+    target = await db.get(Target, target_id)
+    if not target:
+        raise HTTPException(status_code=404, detail="Target not found")
+
+    target.is_active = False
+    await db.commit()
+
+
 # =============================================================================
 # FORM ENDPOINTS
 # =============================================================================
+
+
+async def _resolve_targets(
+    db: AsyncSession,
+    target_ids: Optional[List[UUID]] = None,
+    target_code: Optional[str] = None,
+):
+    """
+    Resuelve los Target a vincular a un formulario.
+
+    Acepta los dos contratos a propósito: `target_ids` es el definitivo, y
+    `target_code` es el que todavía envía el editor del admin. Es el paso de
+    expansión de la fase 1 — cuando el admin migre a target_ids se elimina la
+    segunda rama (ver F1).
+
+    Devuelve siempre una lista, y resuelve ANTES de que haya objetos pendientes
+    en la sesión: hacerlo después dispara un autoflush que persiste el
+    formulario a medio construir y rompe la asignación de la colección (F27).
+    """
+    from app.models.clinical import Target
+
+    if target_ids:
+        result = await db.execute(
+            select(Target).where(Target.target_id.in_(target_ids))
+        )
+        return list(result.scalars().all())
+
+    if target_code:
+        result = await db.execute(
+            select(Target).where(Target.code.ilike(target_code))
+        )
+        return list(result.scalars().all())
+
+    return []
 
 @router.get("/forms", response_model=FormPagination)
 async def list_forms(
@@ -362,33 +446,30 @@ async def create_form(
     )
     existing_form = existing.scalar()
     
+    if existing_form and existing_form.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Form with code '{form_data.code}' already exists"
+        )
+
+    # Resolver los segmentos antes de tocar la sesión: ver _resolve_targets.
+    targets = await _resolve_targets(db, form_data.target_ids, form_data.target)
+
     if existing_form:
-        if not existing_form.is_active:
-            # Reactivate soft-deleted form
-            existing_form.is_active = True
-            existing_form.status = FormStatus.DRAFT
-            existing_form.title_key = form_data.title_key
-            existing_form.description_key = form_data.description_key
-            
-            # Handle Targets
-            if form_data.target_ids:
-                from app.models.clinical import Target
-                targets_res = await db.execute(select(Target).where(Target.target_id.in_(form_data.target_ids)))
-                existing_form.targets = targets_res.scalars().all()
-            
-            existing_form.frecuencia = form_data.frecuencia
-            existing_form.disparador = form_data.disparador
-            
-            await db.commit()
-            await db.refresh(existing_form)
-            
-            return await get_form(existing_form.form_id, db=db, current_user=current_user)
-        else:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Form with code '{form_data.code}' already exists"
-            )
-    
+        # Reactivate soft-deleted form
+        existing_form.is_active = True
+        existing_form.status = FormStatus.DRAFT
+        existing_form.title_key = form_data.title_key
+        existing_form.description_key = form_data.description_key
+        # Reactivar equivale a recrear, así que los segmentos se reemplazan
+        # siempre — incluso por una lista vacía (F4).
+        existing_form.targets = targets
+        existing_form.frecuencia = form_data.frecuencia
+        existing_form.disparador = form_data.disparador
+
+        await db.commit()
+        return await get_form(existing_form.form_id, db=db, current_user=current_user)
+
     form = ClinicalForm(
         code=form_data.code,
         title_key=form_data.title_key,
@@ -397,21 +478,13 @@ async def create_form(
         disparador=form_data.disparador,
         status=FormStatus.DRAFT,
         version=1,
-        is_active=True
+        is_active=True,
+        targets=targets,
     )
-    
-    db.add(form)
-    
-    # Link Targets
-    if form_data.target_ids:
-        from app.models.clinical import Target
-        targets_result = await db.execute(select(Target).where(Target.target_id.in_(form_data.target_ids)))
-        targets = targets_result.scalars().all()
-        form.targets = targets
 
+    db.add(form)
     await db.commit()
-    await db.refresh(form)
-    
+
     return await get_form(form.form_id, db=db, current_user=current_user)
 
 
@@ -463,14 +536,16 @@ async def update_form(
         raise HTTPException(status_code=404, detail="Form not found")
     
     update_data = form_data.model_dump(exclude_unset=True)
-    
-    # Handle Targets
+
+    # Handle Targets. Una lista vacía explícita limpia los segmentos; no
+    # mandar el campo los deja como están (F4).
+    target_code = update_data.pop('target', None)
     if 'target_ids' in update_data:
         target_ids = update_data.pop('target_ids')
         if target_ids is not None:
-            from app.models.clinical import Target
-            targets_res = await db.execute(select(Target).where(Target.target_id.in_(target_ids)))
-            form.targets = targets_res.scalars().all()
+            form.targets = await _resolve_targets(db, target_ids, None)
+    elif target_code is not None:
+        form.targets = await _resolve_targets(db, None, target_code)
 
     for field, value in update_data.items():
         if hasattr(form, field):
@@ -624,6 +699,7 @@ async def create_question(
                     value=opt_data.value,
                     label_key=opt_data.label_key,
                     score=opt_data.score,
+                    context_rules=opt_data.context_rules,
                     order_index=opt_data.order_index
                 )
                 db.add(option)
@@ -647,13 +723,7 @@ async def create_question(
             ui_hint=question.ui_hint,
             is_required=question.is_required,
             order_index=question.order_index,
-            options=[OptionResponse(
-                option_id=o.option_id,
-                value=o.value,
-                label_key=o.label_key,
-                score=o.score,
-                order_index=o.order_index
-            ) for o in options]
+            options=[OptionResponse.model_validate(o) for o in options]
         )
     except Exception as e:
         # Log error in production

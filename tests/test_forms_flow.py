@@ -112,8 +112,9 @@ async def crear_pregunta(client, section_id, data_key, opciones, *, order_index=
     """
     Crea pregunta y opciones en llamadas separadas.
 
-    Es el camino que usa el editor del admin, y el único que funciona: pasar
-    `options` en línea al crear la pregunta devuelve 500 (ver F26).
+    Es el camino que usa el editor del admin. Desde el paso 1a el camino en
+    línea también funciona (ver F26), pero estas pruebas siguen ejercitando el
+    que la aplicación real usa.
     """
     r = await client.post(
         f"{ADMIN}/sections/{section_id}/questions",
@@ -227,14 +228,15 @@ async def test_el_historial_de_la_usuaria_registra_el_cierre(client, user):
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-async def test_f1_el_admin_envia_target_y_el_backend_lo_ignora(
+async def test_f1_el_backend_acepta_el_contrato_viejo_del_editor(
     client, user, target_embarazadas
 ):
     """
-    El editor manda `target` como string; el backend espera `target_ids`.
-    Pydantic descarta el campo desconocido y responde 201 igual.
+    CERRADO en el paso 1a. El editor todavía manda `target` como código en
+    singular; el backend ahora lo resuelve en vez de descartarlo, así que el
+    segmento deja de perderse sin que el admin tenga que cambiar todavía.
 
-    Al cerrar F1: el formulario debe quedar con el segmento asignado.
+    Esta rama desaparece en el paso 1c, junto con extra="forbid".
     """
     r = await client.post(
         f"{ADMIN}/forms",
@@ -247,36 +249,32 @@ async def test_f1_el_admin_envia_target_y_el_backend_lo_ignora(
         },
     )
     assert r.status_code == 201
-    assert r.json()["targets"] == []  # el segmento se perdió, sin error
+    assert [t["code"] for t in r.json()["targets"]] == ["PREGNANT"]
 
 
-async def test_f27_crear_con_segmento_revienta(client, user, target_embarazadas):
+async def test_f27_crear_con_segmento_funciona(client, user, target_embarazadas):
     """
-    El camino correcto tampoco funciona. En create_form, el `db.execute` que
-    busca los targets dispara autoflush y persiste el formulario recién
-    agregado; el `form.targets = targets` siguiente intenta entonces cargar la
-    colección existente con IO síncrono dentro del contexto async.
+    Antes fallaba: en create_form, el `db.execute` que buscaba los targets
+    disparaba un autoflush que persistía el formulario recién agregado, y el
+    `form.targets = targets` siguiente intentaba cargar la colección existente
+    con IO síncrono dentro del contexto async.
 
-    F1 y F27 se tapan mutuamente: como el admin manda el campo equivocado, este
-    camino nunca se ejecuta. Corregir F1 sin corregir F27 convierte la pérdida
-    silenciosa en un 500 y rompe el alta de formularios.
+    F1 y F27 se tapaban mutuamente: como el admin mandaba el campo equivocado,
+    este camino nunca se ejecutaba. Por eso fueron en el mismo cambio.
 
-    En producción esto sale como 500; acá el cliente de pruebas re-lanza la
-    excepción original, que es justamente la que documenta la causa.
-
-    Al cerrar F27: 201 con el segmento asignado.
+    CERRADO en el paso 1a: los segmentos se resuelven antes de que haya nada
+    pendiente en la sesión, y se asignan en el constructor del formulario.
     """
-    from sqlalchemy.exc import MissingGreenlet
-
-    with pytest.raises(MissingGreenlet):
-        await client.post(
-            f"{ADMIN}/forms",
-            json={
-                "code": f"TEST_{uuid.uuid4().hex[:8].upper()}",
-                "title_key": "t",
-                "target_ids": [str(target_embarazadas.target_id)],
-            },
-        )
+    r = await client.post(
+        f"{ADMIN}/forms",
+        json={
+            "code": f"TEST_{uuid.uuid4().hex[:8].upper()}",
+            "title_key": "t",
+            "target_ids": [str(target_embarazadas.target_id)],
+        },
+    )
+    assert r.status_code == 201
+    assert [t["code"] for t in r.json()["targets"]] == ["PREGNANT"]
 
 
 async def test_f27_editar_con_segmento_si_funciona(client, user, target_embarazadas):
@@ -378,24 +376,22 @@ async def test_f5_un_formulario_de_unica_vez_reaparece_tras_completarlo(client, 
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-async def test_f6_editar_y_borrar_segmentos_devuelve_405(
-    client, user, target_embarazadas
-):
+async def test_f6_editar_y_borrar_segmentos(client, user, target_embarazadas):
     """
-    lib/api.ts los llama y la pantalla de segmentos tiene los botones.
-
-    Las rutas con parámetro no existen siquiera, así que el servidor responde
-    404 y no 405: no hay ningún método registrado en esa ruta.
-
-    Al cerrar F6: 200 en PUT y 204 en DELETE.
+    CERRADO en el paso 1a. El borrado es suave: desactiva en vez de destruir,
+    para no romper los formularios y perfiles que ya referencian el segmento.
     """
     tid = target_embarazadas.target_id
 
     r = await client.put(f"{ADMIN}/targets/{tid}", json={"name": "Gestantes"})
-    assert r.status_code == 404
+    assert r.status_code == 200
+    assert r.json()["name"] == "Gestantes"
 
     r = await client.delete(f"{ADMIN}/targets/{tid}")
-    assert r.status_code == 404
+    assert r.status_code == 204
+
+    r = await client.get(f"{ADMIN}/targets")
+    assert str(tid) not in [t["target_id"] for t in r.json()]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -607,16 +603,14 @@ async def test_f11_editar_un_formulario_respondido_no_crea_version_nueva(client,
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-async def test_f26_crear_pregunta_con_opciones_en_linea_devuelve_500(client, user):
+async def test_f26_crear_pregunta_con_opciones_en_linea(client, user):
     """
     QuestionCreate acepta `options`, pero create_question arma la respuesta sin
     `context_rules` y OptionResponse lo declara obligatorio (Optional sin
     default es requerido en Pydantic v2). El ValidationError sale como 500.
 
-    El editor del admin no lo nota porque crea pregunta y opciones por
-    separado, así que este camino del contrato nunca se ejercitó.
-
-    Al cerrar F26: 201, con las opciones y sus context_rules persistidos.
+    CERRADO en el paso 1a: el campo lleva default, la respuesta se construye
+    desde el modelo y create_question persiste las context_rules recibidas.
     """
     _, section_id = await crear_formulario_iciq(client)
 
@@ -628,8 +622,43 @@ async def test_f26_crear_pregunta_con_opciones_en_linea_devuelve_500(client, use
             "type": "single",
             "score_mode": "option_score",
             "order_index": 9,
-            "options": [{"value": "si", "score": 1, "order_index": 0}],
+            "options": [
+                {
+                    "value": "si",
+                    "score": 1,
+                    "order_index": 0,
+                    "context_rules": [{"conditions": {}, "override_score": 7}],
+                }
+            ],
         },
     )
-    assert r.status_code == 500
-    assert "context_rules" in r.json()["detail"]
+    assert r.status_code == 201
+    opcion = r.json()["options"][0]
+    assert opcion["value"] == "si"
+    assert opcion["context_rules"] == [{"conditions": {}, "override_score": 7}]
+
+
+async def test_f4_una_lista_vacia_limpia_los_segmentos(
+    client, user, target_embarazadas
+):
+    """
+    CERRADO en el paso 1a. Antes la guarda `if form_data.target_ids:` trataba
+    la lista vacía como "no tocar", así que un formulario no podía volver a
+    quedar sin segmento.
+
+    Omitir el campo sigue significando "dejar como está": son dos intenciones
+    distintas y ahora se distinguen.
+    """
+    form_id, _ = await crear_formulario_iciq(
+        client, target_ids=[target_embarazadas.target_id]
+    )
+    assert len((await client.get(f"{ADMIN}/forms/{form_id}")).json()["targets"]) == 1
+
+    # No mandar el campo no toca los segmentos
+    r = await client.put(f"{ADMIN}/forms/{form_id}", json={"title_key": "otro"})
+    assert len(r.json()["targets"]) == 1
+
+    # Mandar una lista vacía sí los limpia
+    r = await client.put(f"{ADMIN}/forms/{form_id}", json={"target_ids": []})
+    assert r.status_code == 200
+    assert r.json()["targets"] == []
