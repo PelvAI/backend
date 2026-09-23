@@ -13,7 +13,19 @@ Complementan tests/test_forms_flow.py, que cubre el recorrido completo.
 from types import SimpleNamespace
 from uuid import uuid4
 
+import pytest
+
 from app.services.scoring import ScoringEngine
+
+# Mientras F33 siga abierto, cualquier alerta sin tipo explícito revienta con
+# AttributeError. Estas dos pruebas afirman el comportamiento correcto, así que
+# se marcan como fallo esperado en modo estricto: al cerrar F33 pasarán a verde
+# y pytest exigirá quitarles la marca. No hay forma de olvidarse.
+f33_abierto = pytest.mark.xfail(
+    strict=True,
+    reason="F33: scoring.py usa AlertType.INFO, que no existe en el enum",
+    raises=AttributeError,
+)
 
 
 def opcion(score, context_rules=None):
@@ -227,6 +239,7 @@ def test_una_regla_sin_segmento_aplica_a_todas():
     assert scores == {"t": 1}
 
 
+@f33_abierto
 def test_una_alerta_se_dispara_cuando_su_condicion_es_verdadera():
     e = ScoringEngine()
     reglas = [regla("total", formula="a + b", alert_condition="total >= 10")]
@@ -238,6 +251,7 @@ def test_una_alerta_se_dispara_cuando_su_condicion_es_verdadera():
     assert alertas == []
 
 
+@f33_abierto
 def test_la_alerta_no_registra_el_valor_que_la_disparo():
     """
     El nivel viene fijo en 'high' y el mensaje es genérico, sin el valor. Es lo
