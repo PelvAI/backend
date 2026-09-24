@@ -528,8 +528,8 @@ async def get_form(
         select(ClinicalForm)
         .where(ClinicalForm.form_id == form_id)
         .options(
-            selectinload(ClinicalForm.sections)
             # El editor tampoco muestra lo archivado.
+            selectinload(ClinicalForm.sections.and_(FormSection.is_active == True))
             .selectinload(FormSection.questions.and_(FormQuestion.is_active == True))
             .selectinload(FormQuestion.options),
             selectinload(ClinicalForm.scoring_rules.and_(ScoringRule.is_active == True)),
@@ -772,12 +772,42 @@ async def delete_section(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_admin)
 ):
-    """Delete a section and all its questions."""
-    section = await db.get(FormSection, section_id)
+    """
+    Eliminar una sección, o archivarla si alguna de sus preguntas fue
+    respondida.
+
+    El borrado era físico y arrastraba las preguntas en cascada; como la clave
+    foránea de las respuestas no declara ondelete, eso rompía con una violación
+    sin manejar (F42).
+    """
+    result = await db.execute(
+        select(FormSection)
+        .where(FormSection.section_id == section_id)
+        .options(selectinload(FormSection.questions))
+    )
+    section = result.scalars().first()
     if not section:
         raise HTTPException(status_code=404, detail="Section not found")
-    
-    await db.delete(section)
+
+    ids = [q.question_id for q in section.questions]
+    respondidas = set()
+    if ids:
+        filas = await db.execute(
+            select(SubmissionAnswer.question_id)
+            .where(SubmissionAnswer.question_id.in_(ids))
+            .distinct()
+        )
+        respondidas = {fila[0] for fila in filas.all()}
+
+    if respondidas:
+        # Se conserva todo: la sección deja de ofrecerse y sus preguntas
+        # también, pero las respuestas siguen apuntando a algo que existe.
+        section.is_active = False
+        for q in section.questions:
+            q.is_active = False
+    else:
+        await db.delete(section)
+
     await db.commit()
 
 
@@ -1116,7 +1146,7 @@ async def simulate_scoring(
             .where(ClinicalForm.form_id == form_id)
             .options(
                 selectinload(ClinicalForm.scoring_rules.and_(ScoringRule.is_active == True)),
-                selectinload(ClinicalForm.sections)
+                selectinload(ClinicalForm.sections.and_(FormSection.is_active == True))
                 .selectinload(FormSection.questions.and_(FormQuestion.is_active == True))
                 .selectinload(FormQuestion.options)
             )

@@ -1568,3 +1568,109 @@ async def test_un_bloqueante_pendiente_encabeza_el_listado(client, user):
     assert listado[0]["form_id"] == bloqueante_id
     assert listado[0]["is_blocking"] is True
     assert all(f["is_blocking"] is False for f in listado[1:])
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# F12 / F42 · Varias secciones
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+async def test_f12_un_formulario_puede_tener_varias_secciones(client, user):
+    """
+    CERRADO en la fase 7. El modelo y el backend siempre soportaron N secciones
+    con su bloque clínico; era el editor el que fijaba la primera.
+    """
+    form_id, primera = await crear_formulario_iciq(client, publicar=False)
+
+    r = await client.post(
+        f"{ADMIN}/forms/{form_id}/sections",
+        json={"title_key": "sec.prolapso", "bloque": "PROL", "order_index": 1},
+    )
+    assert r.status_code == 201
+    segunda = r.json()["section_id"]
+
+    await crear_pregunta(client, segunda, "bulto", [("no", 0), ("si", 3)])
+    await client.post(f"{ADMIN}/forms/{form_id}/publish")
+
+    r = await client.get(f"{ADMIN}/forms/{form_id}")
+    secciones = r.json()["sections"]
+    assert len(secciones) == 2
+    assert [s["bloque"] for s in secciones] == ["URIN", "PROL"]
+
+    # La app recibe las dos, en orden
+    code = r.json()["code"]
+    r = await client.get(f"{CLIN}/forms/{code}/schema")
+    assert [s["bloque"] for s in r.json()["sections"]] == ["URIN", "PROL"]
+
+
+async def test_las_secciones_se_pueden_reordenar(client, user):
+    form_id, primera = await crear_formulario_iciq(client, publicar=False)
+    r = await client.post(
+        f"{ADMIN}/forms/{form_id}/sections",
+        json={"title_key": "sec.b", "bloque": "B", "order_index": 1},
+    )
+    segunda = r.json()["section_id"]
+
+    r = await client.put(f"{ADMIN}/sections/{segunda}", json={"order_index": 0})
+    assert r.status_code == 200
+    r = await client.put(f"{ADMIN}/sections/{primera}", json={"order_index": 1})
+    assert r.status_code == 200
+
+    r = await client.get(f"{ADMIN}/forms/{form_id}")
+    assert [s["bloque"] for s in r.json()["sections"]] == ["B", "URIN"]
+
+
+async def test_f42_borrar_una_seccion_respondida_la_archiva(client, user, db_session):
+    """
+    CERRADO en la fase 7. El borrado era físico y arrastraba las preguntas en
+    cascada; como la clave foránea de las respuestas no declara ondelete, eso
+    rompía con una violación sin manejar.
+    """
+    from sqlalchemy import func, select
+
+    from app.models.clinical import FormSection, SubmissionAnswer
+
+    form_id, section_id = await crear_formulario_iciq(client)
+    await responder(
+        client, form_id, {"iciq_frecuencia": "diario", "iciq_cantidad": "poca"}
+    )
+
+    r = await client.delete(f"{ADMIN}/sections/{section_id}")
+    assert r.status_code == 204
+
+    # La sección sigue existiendo, archivada
+    seccion = await db_session.get(FormSection, uuid.UUID(section_id))
+    assert seccion is not None
+    assert seccion.is_active is False
+
+    # Y las respuestas también
+    quedan = await db_session.scalar(select(func.count(SubmissionAnswer.answer_id)))
+    assert quedan == 2
+
+    # Pero deja de ofrecerse
+    r = await client.get(f"{ADMIN}/forms/{form_id}")
+    assert r.json()["sections"] == []
+
+
+async def test_una_seccion_sin_respuestas_si_se_borra(client, user, db_session):
+    from app.models.clinical import FormSection
+
+    form_id, section_id = await crear_formulario_iciq(client, publicar=False)
+
+    r = await client.delete(f"{ADMIN}/sections/{section_id}")
+    assert r.status_code == 204
+    assert await db_session.get(FormSection, uuid.UUID(section_id)) is None
+
+
+async def test_archivar_una_seccion_no_cambia_puntajes_ya_calculados(client, user):
+    """Igual que con las preguntas: lo que manda es qué respondió la mujer."""
+    form_id, section_id = await crear_formulario_iciq(client)
+    sub_id, antes = await responder(
+        client, form_id, {"iciq_frecuencia": "diario", "iciq_cantidad": "moderada"}
+    )
+    assert antes["total_score"] == 7
+
+    await client.delete(f"{ADMIN}/sections/{section_id}")
+
+    r = await client.post(f"{CLIN}/submissions/{sub_id}/finalize")
+    assert r.json()["total_score"] == 7

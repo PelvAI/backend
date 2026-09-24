@@ -73,8 +73,9 @@ async def list_forms(
     query = select(ClinicalForm).options(
         selectinload(ClinicalForm.targets),
         selectinload(ClinicalForm.scoring_rules.and_(ScoringRule.is_active == True)),
-        selectinload(ClinicalForm.sections)
-        # Una pregunta archivada no se le vuelve a ofrecer a nadie.
+        # Ni una sección ni una pregunta archivadas se le vuelven a ofrecer a
+        # nadie.
+        selectinload(ClinicalForm.sections.and_(FormSection.is_active == True))
         .selectinload(FormSection.questions.and_(FormQuestion.is_active == True))
         .selectinload(FormQuestion.options)
     ).where(
@@ -171,7 +172,7 @@ async def get_form_schema(
         .options(
             selectinload(ClinicalForm.targets),
             selectinload(ClinicalForm.scoring_rules.and_(ScoringRule.is_active == True)),
-            selectinload(ClinicalForm.sections)
+            selectinload(ClinicalForm.sections.and_(FormSection.is_active == True))
             .selectinload(FormSection.questions.and_(FormQuestion.is_active == True))
             .selectinload(FormQuestion.options)
         )

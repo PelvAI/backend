@@ -28,6 +28,9 @@ class QuestionResponse(BaseModel):
 class SectionResponse(BaseModel):
     section_id: UUID
     title_key: Optional[str] = None
+    # Agrupación clínica de la sección (URIN, PROL...). La app la necesita para
+    # poder mostrar los resultados por bloque, y no se exponía.
+    bloque: Optional[str] = None
     order_index: int
     questions: List[QuestionResponse]
     model_config = ConfigDict(from_attributes=True)

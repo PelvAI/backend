@@ -194,6 +194,10 @@ class FormSection(Base):
     title_key = Column(String)  # Translation key
     bloque = Column(String)  # Clinical category grouping (e.g., "CONTROL_Y_CONTINENCIA")
     order_index = Column(Integer, default=0)
+
+    # Igual que preguntas y reglas: si tiene preguntas ya respondidas se
+    # archiva, porque destruirla se llevaría evidencia clínica por delante.
+    is_active = Column(Boolean, default=True, nullable=False, server_default="true")
     
     # Relationships
     form = relationship("ClinicalForm", back_populates="sections")
