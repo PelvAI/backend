@@ -75,6 +75,15 @@ class FormResponse(BaseModel):
     disparador: Optional[str] = None
     sections: List[SectionResponse] = []
     scoring_rules: List[ScoringRuleResponse] = []
+
+    # Cuándo le corresponde este cuestionario a quien pregunta. Antes el
+    # listado devolvía todo lo publicado sin mirar si ya se había respondido,
+    # así que la app no podía distinguir lo pendiente de lo hecho (F5, F25).
+    availability: str = "disponible"
+    last_completed_at: Optional[datetime] = None
+    next_available_at: Optional[datetime] = None
+    is_blocking: bool = False
+
     model_config = ConfigDict(from_attributes=True)
 
 # --- Submission Schemas ---

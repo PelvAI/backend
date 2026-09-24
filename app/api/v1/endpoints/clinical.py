@@ -3,7 +3,7 @@ from typing import List, Optional
 from datetime import datetime
 from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 from app.db.session import get_db
 from app.models.clinical import (
@@ -17,6 +17,11 @@ from app.services.recommendations import RecommendationService, GamificationServ
 from app.api import deps
 
 from app.services.automation import TagAutomationService
+from app.services.scheduling import (
+    Disponibilidad,
+    calcular_disponibilidad,
+    es_bloqueante,
+)
 
 router = APIRouter()
 
@@ -102,7 +107,55 @@ async def list_forms(
     result = await db.execute(query)
     # Remove duplicates from join if any
     forms = result.scalars().unique().all()
-    return forms
+
+    # Última vez que esta mujer cerró cada cuestionario. Una sola consulta para
+    # todos, no una por formulario.
+    completadas = await db.execute(
+        select(
+            UserSubmission.form_id,
+            func.max(UserSubmission.completed_at),
+        )
+        .where(
+            UserSubmission.user_id == current_user.user_id,
+            UserSubmission.completed_at.isnot(None),
+        )
+        .group_by(UserSubmission.form_id)
+    )
+    ultima_por_forma = {fid: fecha for fid, fecha in completadas.all()}
+
+    ahora = datetime.utcnow()
+    alta = current_user.created_at
+
+    visibles = []
+    for form in forms:
+        estado, proxima = calcular_disponibilidad(
+            form.frecuencia,
+            form.disparador,
+            ultima_por_forma.get(form.form_id),
+            alta,
+            ahora,
+        )
+
+        # Los manuales no se ofrecen solos: se llega a ellos por enlace directo.
+        if estado == Disponibilidad.MANUAL:
+            continue
+
+        form.availability = estado.value
+        form.last_completed_at = ultima_por_forma.get(form.form_id)
+        form.next_available_at = proxima
+        form.is_blocking = es_bloqueante(form.disparador, estado)
+        visibles.append(form)
+
+    # Lo bloqueante primero, después lo disponible, y al final lo que espera.
+    orden = {
+        Disponibilidad.DISPONIBLE.value: 0,
+        Disponibilidad.EN_ESPERA.value: 1,
+        Disponibilidad.PROXIMAMENTE.value: 2,
+        Disponibilidad.COMPLETADO.value: 3,
+    }
+    visibles.sort(key=lambda f: (not f.is_blocking, orden.get(f.availability, 9), f.code))
+
+    return visibles
 
 @router.get("/forms/{code}/schema", response_model=FormResponse)
 async def get_form_schema(

@@ -451,20 +451,31 @@ async def test_f10_el_filtro_de_archivados_devuelve_los_archivados(client, user)
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-async def test_f5_un_formulario_de_unica_vez_reaparece_tras_completarlo(client, user):
+async def test_f5_un_formulario_de_unica_vez_queda_marcado_como_completado(
+    client, user
+):
     """
-    frecuencia no se lee en ninguna parte: list_forms nunca consulta las
-    submissions previas.
+    CERRADO en la fase 6. La frecuencia no se leía en ninguna parte y el
+    listado nunca consultaba las evaluaciones previas, así que un cuestionario
+    de única vez se repetía para siempre.
 
-    Al cerrar F5: tras completarlo, un UNICA_VEZ no debe volver a listarse.
+    Sigue apareciendo en la lista a propósito —la app necesita poder mostrar lo
+    ya hecho (F25)— pero marcado, y deja de ofrecerse para responder.
     """
     form_id, _ = await crear_formulario_iciq(client)
+
+    r = await client.get(f"{CLIN}/forms")
+    entrada = next(f for f in r.json() if f["form_id"] == form_id)
+    assert entrada["availability"] == "disponible"
+
     await responder(
         client, form_id, {"iciq_frecuencia": "nunca", "iciq_cantidad": "poca"}
     )
 
     r = await client.get(f"{CLIN}/forms")
-    assert form_id in [f["form_id"] for f in r.json()]  # sigue ahí, ya respondido
+    entrada = next(f for f in r.json() if f["form_id"] == form_id)
+    assert entrada["availability"] == "completado"
+    assert entrada["last_completed_at"] is not None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1468,3 +1479,92 @@ async def test_no_se_escriben_respuestas_sobre_una_evaluacion_cerrada(client, us
         json={"answers": [{"question_id": qid, "value": "nunca"}]},
     )
     assert r.status_code == 409
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Periodicidad, de punta a punta
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+async def test_un_cuestionario_mensual_espera_su_ventana(client, user):
+    """Responder un mensual lo pone en espera hasta el mes siguiente."""
+    form_id, _ = await crear_formulario_iciq(client)
+    r = await client.put(f"{ADMIN}/forms/{form_id}", json={"frecuencia": "mensual"})
+    assert r.status_code == 200
+
+    await responder(
+        client, form_id, {"iciq_frecuencia": "nunca", "iciq_cantidad": "poca"}
+    )
+
+    r = await client.get(f"{CLIN}/forms")
+    entrada = next(f for f in r.json() if f["form_id"] == form_id)
+    assert entrada["availability"] == "en_espera"
+    assert entrada["next_available_at"] is not None
+
+
+async def test_un_cuestionario_a_demanda_sigue_disponible(client, user):
+    """El que la mujer decide repetir nunca se pone en espera."""
+    form_id, _ = await crear_formulario_iciq(client)
+    await client.put(f"{ADMIN}/forms/{form_id}", json={"frecuencia": "a_demanda"})
+
+    await responder(
+        client, form_id, {"iciq_frecuencia": "nunca", "iciq_cantidad": "poca"}
+    )
+
+    r = await client.get(f"{CLIN}/forms")
+    entrada = next(f for f in r.json() if f["form_id"] == form_id)
+    assert entrada["availability"] == "disponible"
+
+
+async def test_un_cuestionario_manual_no_aparece_en_el_listado(client, user):
+    """
+    No se ofrece solo: se llega por enlace directo. Pero su esquema sigue
+    siendo accesible por código, que es como funciona ese enlace.
+    """
+    code = f"TEST_{uuid.uuid4().hex[:8].upper()}"
+    form_id, _ = await crear_formulario_iciq(client, code=code)
+    await client.put(f"{ADMIN}/forms/{form_id}", json={"disparador": "manual"})
+
+    r = await client.get(f"{CLIN}/forms")
+    assert form_id not in [f["form_id"] for f in r.json()]
+
+    r = await client.get(f"{CLIN}/forms/{code}/schema")
+    assert r.status_code == 200
+
+
+async def test_un_cuestionario_de_dia_30_no_aparece_a_una_usuaria_nueva(
+    client, user, db_session
+):
+    """Los disparadores temporales cuentan desde el alta de la usuaria."""
+    form_id, _ = await crear_formulario_iciq(client)
+    await client.put(f"{ADMIN}/forms/{form_id}", json={"disparador": "dia_30"})
+
+    r = await client.get(f"{CLIN}/forms")
+    entrada = next(f for f in r.json() if f["form_id"] == form_id)
+    assert entrada["availability"] == "proximamente"
+    assert entrada["next_available_at"] is not None
+
+    # La misma usuaria, dada de alta hace dos meses
+    from datetime import datetime, timedelta
+
+    user.created_at = datetime.utcnow() - timedelta(days=60)
+    await db_session.commit()
+
+    r = await client.get(f"{CLIN}/forms")
+    entrada = next(f for f in r.json() if f["form_id"] == form_id)
+    assert entrada["availability"] == "disponible"
+
+
+async def test_un_bloqueante_pendiente_encabeza_el_listado(client, user):
+    """Lo que hay que responder antes que nada va primero y viene marcado."""
+    await crear_formulario_iciq(client)
+    bloqueante_id, _ = await crear_formulario_iciq(client)
+    await client.put(
+        f"{ADMIN}/forms/{bloqueante_id}", json={"disparador": "bloqueante"}
+    )
+
+    r = await client.get(f"{CLIN}/forms")
+    listado = r.json()
+    assert listado[0]["form_id"] == bloqueante_id
+    assert listado[0]["is_blocking"] is True
+    assert all(f["is_blocking"] is False for f in listado[1:])
