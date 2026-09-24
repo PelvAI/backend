@@ -613,6 +613,7 @@ async def test_f17_el_puntaje_total_solo_reconoce_los_nombres_de_iciq(client, us
     deja total_score en cero, en silencio.
 
     Al cerrar F17: el formulario debe poder declarar cuál es su variable total.
+    Ver test_f17_el_formulario_declara_cual_es_su_puntaje_total.
     """
     form_id, _ = await crear_formulario_iciq(client)
 
@@ -628,7 +629,9 @@ async def test_f17_el_puntaje_total_solo_reconoce_los_nombres_de_iciq(client, us
     )
 
     assert sub["calculated_values"]["severidad_global"] == 10
-    assert sub["total_score"] == 0  # calculado pero no promovido
+    # Sin regla marcada ni nombre reconocible, el formulario no declara total.
+    # Antes eso se informaba como cero, que clínicamente dice otra cosa.
+    assert sub["total_score"] is None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1173,3 +1176,100 @@ async def test_desmarcar_la_regla_total_no_rompe_la_columna(client, user):
     r = await client.put(f"{ADMIN}/rules/{rule_id}", json={"is_total": None})
     assert r.status_code == 200
     assert r.json()["is_total"] is False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# F40 · Una respuesta faltante no puede leerse como "sin síntomas"
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+async def test_f40_si_falta_una_respuesta_el_puntaje_es_nulo_y_no_cero(client, user):
+    """
+    Ninguna pregunta es obligatoria hoy, así que una mujer puede saltear un
+    ítem. La fórmula entonces no resuelve, el motor se traga el error y la
+    variable no se calcula.
+
+    Informar eso como cero es lo peligroso: un cero se lee clínicamente como
+    "sin síntomas", que puede ser exactamente lo contrario de lo que pasó. El
+    puntaje tiene que ser nulo y hay que poder saber qué no se calculó.
+    """
+    form_id, _ = await crear_formulario_iciq(client)
+
+    r = await client.post(f"{ADMIN}/forms/{form_id}/rules")
+    r = await client.get(f"{ADMIN}/forms/{form_id}")
+    rule_id = r.json()["scoring_rules"][0]["rule_id"]
+    await client.put(f"{ADMIN}/rules/{rule_id}", json={"is_total": True})
+
+    # Sólo una de las dos preguntas que la fórmula necesita
+    _, sub = await responder(client, form_id, {"iciq_frecuencia": "diario"})
+
+    assert sub["total_score"] is None
+    assert "iciq_total" not in sub["calculated_values"]
+
+
+async def test_con_todas_las_respuestas_el_puntaje_si_sale(client, user):
+    """El contraste, para aislar la causa."""
+    form_id, _ = await crear_formulario_iciq(client)
+    r = await client.get(f"{ADMIN}/forms/{form_id}")
+    rule_id = r.json()["scoring_rules"][0]["rule_id"]
+    await client.put(f"{ADMIN}/rules/{rule_id}", json={"is_total": True})
+
+    _, sub = await responder(
+        client, form_id, {"iciq_frecuencia": "diario", "iciq_cantidad": "moderada"}
+    )
+    assert sub["total_score"] == 7
+
+
+async def test_el_simulador_avisa_que_una_formula_no_se_pudo_calcular(client, user):
+    """
+    Quien diseña el cuestionario tiene que ver que su fórmula no resuelve, no
+    un cero silencioso.
+    """
+    form_id, _ = await crear_formulario_iciq(client)
+
+    r = await client.post(
+        f"{ADMIN}/forms/{form_id}/simulate",
+        json={"answers": {"iciq_frecuencia": "diario"}},
+    )
+    assert r.status_code == 200
+    assert r.json()["total_score"] is None
+    assert "iciq_total" in r.json()["uncomputed"]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Una interpretación sin validar se entrega señalada
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+async def test_una_interpretacion_no_validada_viaja_marcada_como_provisoria(
+    client, user
+):
+    """
+    Los umbrales que traducen un puntaje a "Leve" o "Severo" son criterio
+    médico. Mientras nadie los valide, la etiqueta se entrega igual —sirve para
+    trabajar— pero señalada, para que no se confunda con criterio confirmado.
+    """
+    form_id, _ = await crear_formulario_iciq(client)
+    r = await client.get(f"{ADMIN}/forms/{form_id}")
+    rule_id = r.json()["scoring_rules"][0]["rule_id"]
+
+    await client.put(
+        f"{ADMIN}/rules/{rule_id}",
+        json={"is_total": True, "interpretation_ranges": {"0-5": "Leve", "6-20": "Alto"}},
+    )
+
+    r = await client.post(
+        f"{ADMIN}/forms/{form_id}/simulate",
+        json={"answers": {"iciq_frecuencia": "diario", "iciq_cantidad": "moderada"}},
+    )
+    assert r.json()["interpretation"] == "Alto"
+    assert r.json()["interpretation_is_provisional"] is True
+
+    await client.put(f"{ADMIN}/rules/{rule_id}", json={"interpretation_validated": True})
+
+    r = await client.post(
+        f"{ADMIN}/forms/{form_id}/simulate",
+        json={"answers": {"iciq_frecuencia": "diario", "iciq_cantidad": "moderada"}},
+    )
+    assert r.json()["interpretation"] == "Alto"
+    assert r.json()["interpretation_is_provisional"] is False

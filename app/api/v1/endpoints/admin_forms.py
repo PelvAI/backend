@@ -144,6 +144,8 @@ class ScoringRuleCreate(BaseModel):
     target_id: Optional[UUID] = None
     # Marca esta regla como la que produce el puntaje total del formulario.
     is_total: bool = False
+    # Si la clínica confirmó los rangos de interpretación. Nace en falso.
+    interpretation_validated: bool = False
     order_index: int = 0
 
 class ScoringRuleUpdate(BaseModel):
@@ -154,6 +156,7 @@ class ScoringRuleUpdate(BaseModel):
     alert_type: Optional[AlertType] = None
     target_id: Optional[UUID] = None
     is_total: Optional[bool] = None
+    interpretation_validated: Optional[bool] = None
     order_index: Optional[int] = None
 
 class ScoringRuleResponse(BaseModel):
@@ -165,6 +168,7 @@ class ScoringRuleResponse(BaseModel):
     alert_type: Optional[AlertType]
     target_id: Optional[UUID]
     is_total: bool = False
+    interpretation_validated: bool = False
     order_index: Optional[int]
     
     class Config:
@@ -964,6 +968,7 @@ async def create_scoring_rule(
         formula=rule_data.formula,
         interpretation_ranges=rule_data.interpretation_ranges,
         is_total=rule_data.is_total,
+        interpretation_validated=rule_data.interpretation_validated,
         alert_condition=rule_data.alert_condition,
         alert_type=rule_data.alert_type,
         target_id=rule_data.target_id,
@@ -992,7 +997,7 @@ async def update_scoring_rule(
     for field, value in update_data.items():
         # is_total es NOT NULL en la base: un null explícito en el cuerpo
         # reventaría al commitear, así que se interpreta como "no marcada".
-        if field == "is_total" and value is None:
+        if field in ("is_total", "interpretation_validated") and value is None:
             value = False
         setattr(rule, field, value)
 
@@ -1029,8 +1034,12 @@ class SimulationResponse(BaseModel):
     alerts: List[str]  # Just messages for simulation
     # El simulador devuelve ahora lo mismo que persiste el cierre real, para
     # que lo que ve la clínica sea comparable con lo que recibe la paciente.
-    total_score: float = 0.0
+    total_score: Optional[float] = None
+    # Variables cuya fórmula no resolvió: quien diseña el cuestionario necesita
+    # verlas, no un cero silencioso.
+    uncomputed: List[str] = []
     interpretation: Optional[str] = None
+    interpretation_is_provisional: bool = False
     answer_scores: Dict[str, float] = {}
 
 @router.post("/forms/{form_id}/simulate", response_model=SimulationResponse)
@@ -1097,7 +1106,9 @@ async def simulate_scoring(
             scores=resultado.values,
             alerts=[f"[{a.level.upper()}] {a.message}" for a in resultado.alerts],
             total_score=resultado.total_score,
+            uncomputed=resultado.uncomputed,
             interpretation=resultado.interpretation,
+            interpretation_is_provisional=resultado.interpretation_is_provisional,
             answer_scores={
                 a.data_key: a.score for a in resultado.answer_scores if a.data_key
             },

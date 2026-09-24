@@ -292,6 +292,14 @@ class ScoringRule(Base):
     # se adivinaba por el nombre de la variable, así que cualquier cuestionario
     # que no se llamara como el ICIQ quedaba en cero sin avisar (F17).
     is_total = Column(Boolean, default=False, nullable=False, server_default="false")
+
+    # Si la clínica validó los rangos de interpretación. Nace en falso: marcar
+    # algo como validado tiene que ser un acto deliberado de quien puede
+    # hacerlo. Lo provisorio se muestra con su advertencia, pero no alimenta
+    # decisiones clínicas automáticas.
+    interpretation_validated = Column(
+        Boolean, default=False, nullable=False, server_default="false"
+    )
     
     # Alert configuration
     alert_condition = Column(Text)  # e.g., "value >= 10"

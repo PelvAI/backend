@@ -138,16 +138,18 @@ async def seed_data():
         # no tenía nada que calcular: una mujer los respondía y su evaluación
         # quedaba con puntaje cero (F38).
         #
-        # Los rangos de interpretación siguen las bandas habitualmente
-        # publicadas para cada instrumento. CONVIENE QUE LA CLÍNICA LAS
-        # CONFIRME antes de usarlas para decidir derivaciones: la aritmética es
-        # inequívoca, los umbrales son criterio clínico.
+        # La aritmética es inequívoca; los umbrales son criterio clínico. Los
+        # rangos siguen las bandas habitualmente publicadas para cada
+        # instrumento, pero quedan marcados como NO validados: la etiqueta se
+        # muestra con su advertencia y no debe alimentar derivaciones ni
+        # asignación de planes hasta que la clínica los confirme.
 
         db.add(ScoringRule(
             form_id=iciq.form_id,
             variable_name="iciq_total",
             formula="freq + amount + impact",
             is_total=True,
+            interpretation_validated=False,  # pendiente de confirmación clínica
             # ICIQ-SF: suma de los tres ítems, recorrido 0-21.
             interpretation_ranges={
                 "0": "Sin síntomas",
@@ -167,6 +169,9 @@ async def seed_data():
             # no se calcula.
             formula="(popdi_1 + popdi_2 + popdi_3 + popdi_4 + popdi_5 + popdi_6) / 6 * 25",
             is_total=True,
+            # Sin rangos: la interpretación del POPDI-6 todavía no está
+            # definida, y preferimos no tenerla a tenerla inventada.
+            interpretation_validated=False,
             order_index=0,
         ))
 

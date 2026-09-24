@@ -56,8 +56,21 @@ class ScoringResult:
     context: Dict[str, Any] = field(default_factory=dict)
     answer_scores: List[AnswerScore] = field(default_factory=list)
     alerts: List[AlertResult] = field(default_factory=list)
-    total_score: float = 0.0
+
+    # Nulo, no cero, cuando la fórmula del total no resolvió. Un cero se lee
+    # clínicamente como "sin síntomas", que puede ser exactamente lo contrario
+    # de lo que pasó: basta que la mujer haya salteado un ítem para que la
+    # fórmula no resuelva (F40).
+    total_score: Optional[float] = None
+    # Variables cuya fórmula no pudo evaluarse, normalmente porque falta alguna
+    # respuesta que referencian.
+    uncomputed: List[str] = field(default_factory=list)
+
     interpretation: Optional[str] = None
+    # La interpretación surge de umbrales que son criterio clínico. Mientras la
+    # regla no esté marcada como validada, la etiqueta se entrega igual pero
+    # señalada: informa, no decide.
+    interpretation_is_provisional: bool = False
 
 
 class ScoringEngine:
@@ -219,9 +232,19 @@ class ScoringEngine:
                     )
                 )
 
+        # Reglas con fórmula que no llegaron a calcularse.
+        uncomputed = [
+            r.variable_name
+            for r in rules
+            if r.formula
+            and r.variable_name not in values
+            and not (r.target_id and str(r.target_id) not in targets)
+        ]
+
         total_rule = self._find_total_rule(rules, values)
-        total_score = 0.0
+        total_score = None
         interpretation = None
+        provisional = False
 
         if total_rule is not None:
             valor = values.get(total_rule.variable_name)
@@ -229,6 +252,16 @@ class ScoringEngine:
                 total_score = float(valor)
                 interpretation = self._interpret(
                     getattr(total_rule, "interpretation_ranges", None), total_score
+                )
+                if interpretation is not None:
+                    provisional = not getattr(
+                        total_rule, "interpretation_validated", False
+                    )
+            else:
+                logger.warning(
+                    "No se pudo calcular el puntaje total %r: la fórmula no "
+                    "resolvió, probablemente por respuestas faltantes",
+                    total_rule.variable_name,
                 )
 
         # Contexto completo para depuración y simulación; lo que se persiste es
@@ -242,7 +275,9 @@ class ScoringEngine:
             answer_scores=answer_scores,
             alerts=alerts,
             total_score=total_score,
+            uncomputed=uncomputed,
             interpretation=interpretation,
+            interpretation_is_provisional=provisional,
         )
 
     @staticmethod
