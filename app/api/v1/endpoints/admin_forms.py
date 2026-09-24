@@ -910,11 +910,15 @@ async def update_scoring_rule(
     
     update_data = rule_data.model_dump(exclude_unset=True)
     for field, value in update_data.items():
+        # is_total es NOT NULL en la base: un null explícito en el cuerpo
+        # reventaría al commitear, así que se interpreta como "no marcada".
+        if field == "is_total" and value is None:
+            value = False
         setattr(rule, field, value)
-    
+
     await db.commit()
     await db.refresh(rule)
-    
+
     return rule
 
 

@@ -1033,3 +1033,72 @@ async def test_f18_las_formulas_pueden_usar_el_valor_crudo_de_una_respuesta(
     # se conserva a propósito.
     assert "edad" not in sub["calculated_values"]
     assert sub["calculated_values"]["mayor_de_40"] == 1
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# F35 / F37 · Lo que la fase 2 dejó sin alcanzar desde el panel
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+async def test_f35_la_regla_total_viaja_de_ida_y_vuelta(client, user):
+    """
+    CERRADO en el repaso de la fase 2. El backend soportaba is_total pero el
+    editor no lo enviaba, así que F17 quedaba inalcanzable desde el panel.
+    """
+    form_id, _ = await crear_formulario_iciq(client)
+
+    r = await client.post(
+        f"{ADMIN}/forms/{form_id}/rules",
+        json={"variable_name": "otro", "formula": "1", "is_total": True, "order_index": 9},
+    )
+    assert r.status_code == 201
+    assert r.json()["is_total"] is True
+
+    r = await client.get(f"{ADMIN}/forms/{form_id}")
+    reglas = {x["variable_name"]: x for x in r.json()["scoring_rules"]}
+    assert reglas["otro"]["is_total"] is True
+    assert reglas["iciq_total"]["is_total"] is False
+
+
+async def test_f37_los_rangos_de_interpretacion_viajan_de_ida_y_vuelta(client, user):
+    """
+    CERRADO en el repaso de la fase 2. Ningún cliente enviaba
+    interpretation_ranges, de modo que F29 funcionaba en el backend pero no se
+    podía alimentar desde el panel.
+    """
+    form_id, _ = await crear_formulario_iciq(client)
+
+    rangos = {"0-5": "Leve", "6-9": "Moderado", ">=10": "Severo"}
+    r = await client.get(f"{ADMIN}/forms/{form_id}")
+    rule_id = r.json()["scoring_rules"][0]["rule_id"]
+
+    r = await client.put(
+        f"{ADMIN}/rules/{rule_id}",
+        json={"is_total": True, "interpretation_ranges": rangos},
+    )
+    assert r.status_code == 200
+    assert r.json()["interpretation_ranges"] == rangos
+
+    r = await client.get(f"{ADMIN}/forms/{form_id}")
+    assert r.json()["scoring_rules"][0]["interpretation_ranges"] == rangos
+
+
+async def test_desmarcar_la_regla_total_no_rompe_la_columna(client, user):
+    """
+    is_total es NOT NULL. El editor envía siempre un booleano, pero un null
+    explícito en el cuerpo llegaría a la base y reventaría al commitear.
+    """
+    form_id, _ = await crear_formulario_iciq(client)
+    r = await client.get(f"{ADMIN}/forms/{form_id}")
+    rule_id = r.json()["scoring_rules"][0]["rule_id"]
+
+    r = await client.put(f"{ADMIN}/rules/{rule_id}", json={"is_total": True})
+    assert r.json()["is_total"] is True
+
+    r = await client.put(f"{ADMIN}/rules/{rule_id}", json={"is_total": False})
+    assert r.status_code == 200
+    assert r.json()["is_total"] is False
+
+    r = await client.put(f"{ADMIN}/rules/{rule_id}", json={"is_total": None})
+    assert r.status_code == 200
+    assert r.json()["is_total"] is False
