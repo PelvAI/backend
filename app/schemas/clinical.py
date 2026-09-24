@@ -21,6 +21,15 @@ class QuestionResponse(BaseModel):
     text_key: Optional[str] = None
     ui_hint: Optional[str] = None
     config: Optional[Dict[str, Any]] = None
+
+    # Sin estos cuatro la app no puede hacer su trabajo: evaluaba condiciones
+    # que nunca recibía, exigía respuestas obligatorias que no sabía cuáles
+    # eran, y descartaba las ayudas que alguien escribió en el editor (F43).
+    show_if: Optional[str] = None
+    is_required: bool = False
+    help_text: Optional[str] = None
+    placeholder: Optional[str] = None
+
     order_index: int = 0
     options: List[OptionResponse] = []
     model_config = ConfigDict(from_attributes=True)

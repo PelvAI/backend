@@ -1674,3 +1674,55 @@ async def test_archivar_una_seccion_no_cambia_puntajes_ya_calculados(client, use
 
     r = await client.post(f"{CLIN}/submissions/{sub_id}/finalize")
     assert r.json()["total_score"] == 7
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# F43 · El esquema que recibe la app tiene que traer todo lo que usa
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+async def test_f43_el_esquema_trae_los_campos_que_la_app_necesita(client, user):
+    """
+    CERRADO tras el recorrido real. La app evaluaba condiciones que nunca
+    recibía, exigía respuestas obligatorias sin saber cuáles eran y descartaba
+    las ayudas escritas en el editor: QuestionResponse no exponía show_if,
+    is_required, help_text ni placeholder.
+
+    Las pruebas de la PWA no lo detectaron porque usaban un esquema inventado
+    que sí los traía. Sólo levantar el sistema completo lo encontró, y por eso
+    esta prueba mira el contrato y no el comportamiento.
+    """
+    code = f"TEST_{uuid.uuid4().hex[:8].upper()}"
+    form_id, section_id = await crear_formulario_iciq(client, code=code, publicar=False)
+
+    r = await client.post(
+        f"{ADMIN}/sections/{section_id}/questions",
+        json={
+            "data_key": "condicionada",
+            "text_key": "q.condicionada",
+            "type": "text",
+            "show_if": "iciq_frecuencia > 2",
+            "is_required": True,
+            "help_text": "Contanos lo que recuerdes.",
+            "placeholder": "Escribí acá",
+            "order_index": 9,
+        },
+    )
+    assert r.status_code == 201
+    await client.post(f"{ADMIN}/forms/{form_id}/publish")
+
+    r = await client.get(f"{CLIN}/forms/{code}/schema")
+    assert r.status_code == 200
+
+    preguntas = {
+        q["data_key"]: q for s in r.json()["sections"] for q in s["questions"]
+    }
+    q = preguntas["condicionada"]
+
+    assert q["show_if"] == "iciq_frecuencia > 2"
+    assert q["is_required"] is True
+    assert q["help_text"] == "Contanos lo que recuerdes."
+    assert q["placeholder"] == "Escribí acá"
+
+    # Y el bloque clínico de la sección, que la app usa para agrupar
+    assert r.json()["sections"][0]["bloque"] == "URIN"
