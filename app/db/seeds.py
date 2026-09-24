@@ -133,6 +133,43 @@ async def seed_data():
             for v, opt_txt, s in [("0", "Nada", 0), ("1", "Un poco", 1), ("2", "Moderadamente", 2), ("3", "Mucho", 3)]:
                 db.add(AnswerOption(question_id=q.question_id, value=v, label_key=opt_txt, score=s))
 
+        # --- Reglas de puntuación -------------------------------------------
+        # Los dos cuestionarios se sembraban sin ninguna regla, así que el motor
+        # no tenía nada que calcular: una mujer los respondía y su evaluación
+        # quedaba con puntaje cero (F38).
+        #
+        # Los rangos de interpretación siguen las bandas habitualmente
+        # publicadas para cada instrumento. CONVIENE QUE LA CLÍNICA LAS
+        # CONFIRME antes de usarlas para decidir derivaciones: la aritmética es
+        # inequívoca, los umbrales son criterio clínico.
+
+        db.add(ScoringRule(
+            form_id=iciq.form_id,
+            variable_name="iciq_total",
+            formula="freq + amount + impact",
+            is_total=True,
+            # ICIQ-SF: suma de los tres ítems, recorrido 0-21.
+            interpretation_ranges={
+                "0": "Sin síntomas",
+                "1-5": "Leve",
+                "6-12": "Moderado",
+                "13-18": "Severo",
+                "19-21": "Muy severo",
+            },
+            order_index=0,
+        ))
+
+        db.add(ScoringRule(
+            form_id=pfdi.form_id,
+            variable_name="popdi_6",
+            # POPDI-6: media de los seis ítems escalada a 0-100. Exige las seis
+            # respondidas; si falta alguna, la fórmula no resuelve y la variable
+            # no se calcula.
+            formula="(popdi_1 + popdi_2 + popdi_3 + popdi_4 + popdi_5 + popdi_6) / 6 * 25",
+            is_total=True,
+            order_index=0,
+        ))
+
         logger.info("Created professional clinical forms.")
 
         # --- 4. EXERCISES ---

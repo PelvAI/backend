@@ -381,16 +381,17 @@ async def list_forms(
     """
     from app.models.clinical import Target
 
-    # Base query for counting
-    count_query = select(func.count(ClinicalForm.form_id)).where(ClinicalForm.is_active == True)
-
-    # Base query for fetching (No eager load options to avoid async issues)
-    query = select(ClinicalForm).where(ClinicalForm.is_active == True)
-    
-    # Apply filters
+    # El estado gobierna la visibilidad, no is_active: archivar pone los dos en
+    # su lugar a la vez. Antes ambos se combinaban con AND, de modo que filtrar
+    # por ARCHIVED devolvía el conjunto vacío por construcción y un formulario
+    # archivado se volvía inalcanzable desde el panel (F9, F10).
     if status:
-        count_query = count_query.where(ClinicalForm.status == status)
-        query = query.where(ClinicalForm.status == status)
+        visibilidad = ClinicalForm.status == status
+    else:
+        visibilidad = ClinicalForm.status != FormStatus.ARCHIVED
+
+    count_query = select(func.count(ClinicalForm.form_id)).where(visibilidad)
+    query = select(ClinicalForm).where(visibilidad)
     
     if target_code:
         # Filter where form has the specific target
@@ -597,6 +598,85 @@ async def delete_form(
 # =============================================================================
 # SECTION ENDPOINTS
 # =============================================================================
+
+@router.post("/forms/{form_id}/publish", response_model=FormDetailResponse)
+async def publish_form(
+    form_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_admin)
+):
+    """
+    Publicar un formulario: recién a partir de acá lo ven las usuarias.
+
+    Se exige al menos una pregunta. Publicar un cuestionario vacío no le sirve
+    a nadie y era justamente lo que pasaba solo antes de que el estado se
+    respetara (F2).
+    """
+    result = await db.execute(
+        select(ClinicalForm)
+        .where(ClinicalForm.form_id == form_id)
+        .options(selectinload(ClinicalForm.sections).selectinload(FormSection.questions))
+    )
+    form = result.scalars().first()
+    if not form:
+        raise HTTPException(status_code=404, detail="Form not found")
+
+    if not any(sec.questions for sec in form.sections):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot publish a form with no questions",
+        )
+
+    form.status = FormStatus.ACTIVE
+    form.is_active = True
+    await db.commit()
+
+    return await get_form(form_id, db=db, current_user=current_user)
+
+
+@router.post("/forms/{form_id}/unpublish", response_model=FormDetailResponse)
+async def unpublish_form(
+    form_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_admin)
+):
+    """
+    Devolver un formulario a borrador: deja de mostrarse en la aplicación.
+
+    Las evaluaciones ya respondidas no se tocan; sólo deja de ofrecerse.
+    """
+    form = await db.get(ClinicalForm, form_id)
+    if not form:
+        raise HTTPException(status_code=404, detail="Form not found")
+
+    form.status = FormStatus.DRAFT
+    await db.commit()
+
+    return await get_form(form_id, db=db, current_user=current_user)
+
+
+@router.post("/forms/{form_id}/restore", response_model=FormDetailResponse)
+async def restore_form(
+    form_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_admin)
+):
+    """
+    Sacar un formulario del archivo y devolverlo a borrador.
+
+    Vuelve como borrador a propósito: quien lo archivó tuvo un motivo, así que
+    reaparecer en la aplicación debe ser una decisión aparte (F9).
+    """
+    form = await db.get(ClinicalForm, form_id)
+    if not form:
+        raise HTTPException(status_code=404, detail="Form not found")
+
+    form.is_active = True
+    form.status = FormStatus.DRAFT
+    await db.commit()
+
+    return await get_form(form_id, db=db, current_user=current_user)
+
 
 @router.post("/forms/{form_id}/sections", response_model=SectionResponse, status_code=status.HTTP_201_CREATED)
 async def create_section(

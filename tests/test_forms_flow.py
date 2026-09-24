@@ -88,10 +88,13 @@ async def target_embarazadas(db_session: AsyncSession) -> Target:
     return t
 
 
-async def crear_formulario_iciq(client, *, code=None, target_ids=None):
+async def crear_formulario_iciq(client, *, code=None, target_ids=None, publicar=True):
     """
     Arma un formulario de dos preguntas con puntaje por opción y una regla que
     los suma, imitando la forma del ICIQ-SF. Devuelve (form_id, section_id).
+
+    Publica por defecto: desde la fase 3 un formulario recién creado queda en
+    borrador y no lo ve nadie hasta que alguien decide publicarlo.
     """
     code = code or f"TEST_{uuid.uuid4().hex[:8].upper()}"
     r = await client.post(
@@ -129,6 +132,10 @@ async def crear_formulario_iciq(client, *, code=None, target_ids=None):
         },
     )
     assert r.status_code == 201, r.text
+
+    if publicar:
+        r = await client.post(f"{ADMIN}/forms/{form_id}/publish")
+        assert r.status_code == 200, r.text
 
     return form_id, section_id
 
@@ -322,37 +329,81 @@ async def test_f27_editar_con_segmento_si_funciona(client, user, target_embaraza
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-async def test_f2_un_borrador_ya_es_visible_para_la_usuaria(client, user):
+async def test_f2_un_borrador_no_llega_a_la_usuaria_hasta_publicarse(client, user):
     """
-    create_form fuerza status=DRAFT, y list_forms no filtra por status.
-
-    Al cerrar F2: un DRAFT no debe aparecer hasta publicarse.
+    CERRADO en la fase 3. create_form deja el formulario en borrador y la
+    aplicación ahora filtra por estado, así que existe un acto de publicar.
     """
-    form_id, _ = await crear_formulario_iciq(client)
+    form_id, _ = await crear_formulario_iciq(client, publicar=False)
 
     r = await client.get(f"{ADMIN}/forms/{form_id}")
     assert r.json()["status"] == "draft"
 
     r = await client.get(f"{CLIN}/forms")
-    assert form_id in [f["form_id"] for f in r.json()]  # visible aun siendo borrador
+    assert form_id not in [f["form_id"] for f in r.json()]
+
+    r = await client.post(f"{ADMIN}/forms/{form_id}/publish")
+    assert r.status_code == 200
+    assert r.json()["status"] == "active"
+
+    r = await client.get(f"{CLIN}/forms")
+    assert form_id in [f["form_id"] for f in r.json()]
+
+
+async def test_un_borrador_tampoco_se_abre_adivinando_su_codigo(client, user):
+    """El esquema por código respeta el mismo criterio que el listado."""
+    code = f"TEST_{uuid.uuid4().hex[:8].upper()}"
+    await crear_formulario_iciq(client, code=code, publicar=False)
+
+    r = await client.get(f"{CLIN}/forms/{code}/schema")
+    assert r.status_code == 404
+
+
+async def test_despublicar_lo_retira_sin_tocar_lo_respondido(client, user):
+    """Volver a borrador deja de ofrecerlo; el historial queda intacto."""
+    form_id, _ = await crear_formulario_iciq(client)
+    await responder(
+        client, form_id, {"iciq_frecuencia": "diario", "iciq_cantidad": "poca"}
+    )
+
+    r = await client.post(f"{ADMIN}/forms/{form_id}/unpublish")
+    assert r.status_code == 200
+
+    r = await client.get(f"{CLIN}/forms")
+    assert form_id not in [f["form_id"] for f in r.json()]
+
+    r = await client.get(f"{CLIN}/submissions/history")
+    assert len(r.json()) == 1
+
+
+async def test_no_se_publica_un_formulario_sin_preguntas(client, user):
+    """Publicar un cuestionario vacío no le sirve a nadie."""
+    r = await client.post(
+        f"{ADMIN}/forms", json={"code": f"TEST_{uuid.uuid4().hex[:8].upper()}"}
+    )
+    form_id = r.json()["form_id"]
+
+    r = await client.post(f"{ADMIN}/forms/{form_id}/publish")
+    assert r.status_code == 400
+    assert "no questions" in r.json()["detail"]
 
 
 async def test_f3_un_formulario_sin_segmento_se_muestra_a_todas(client, user):
     """
     Al cerrar F3: un formulario sin segmento no debería alcanzar a todas por
-    defecto, o al menos no combinado con F1.
+    defecto. Con F1 y F2 ya cerrados el riesgo bajó mucho —ahora hay que
+    publicarlo a propósito— pero la regla sigue en pie.
     """
     form_id, _ = await crear_formulario_iciq(client, target_ids=[])
     r = await client.get(f"{CLIN}/forms")
     assert form_id in [f["form_id"] for f in r.json()]
 
 
-async def test_f9_archivar_lo_saca_de_la_app_y_tambien_del_admin(client, user):
+async def test_f9_un_formulario_archivado_se_puede_encontrar_y_restaurar(client, user):
     """
-    El borrado suave funciona de cara a la app, pero el listado del admin filtra
-    is_active == True, así que el formulario archivado se vuelve inalcanzable.
-
-    Al cerrar F9: debe seguir visible en el admin y poder restaurarse.
+    CERRADO en la fase 3. Archivar seguía sacándolo de la aplicación, que es lo
+    correcto, pero el listado del panel filtraba por is_active y el formulario
+    quedaba inalcanzable: un borrado suave que se comportaba como definitivo.
     """
     form_id, _ = await crear_formulario_iciq(client)
 
@@ -360,19 +411,39 @@ async def test_f9_archivar_lo_saca_de_la_app_y_tambien_del_admin(client, user):
     assert r.status_code == 204
 
     r = await client.get(f"{CLIN}/forms")
-    assert form_id not in [f["form_id"] for f in r.json()]  # correcto
+    assert form_id not in [f["form_id"] for f in r.json()]
 
+    # Fuera del listado por defecto del panel, pero alcanzable al pedir archivados
     r = await client.get(f"{ADMIN}/forms")
-    assert form_id not in [f["form_id"] for f in r.json()["items"]]  # queda huérfano
+    assert form_id not in [f["form_id"] for f in r.json()["items"]]
+
+    r = await client.get(f"{ADMIN}/forms", params={"status": "archived"})
+    assert form_id in [f["form_id"] for f in r.json()["items"]]
+
+    # Restaurar lo devuelve a borrador, no directo a la aplicación
+    r = await client.post(f"{ADMIN}/forms/{form_id}/restore")
+    assert r.status_code == 200
+    assert r.json()["status"] == "draft"
+    assert r.json()["is_active"] is True
+
+    r = await client.get(f"{CLIN}/forms")
+    assert form_id not in [f["form_id"] for f in r.json()]
 
 
-async def test_f10_el_filtro_de_archivados_nunca_devuelve_nada(client, user):
-    """status se combina con is_active == True mediante AND: conjunto vacío."""
+async def test_f10_el_filtro_de_archivados_devuelve_los_archivados(client, user):
+    """
+    CERRADO en la fase 3. El estado se combinaba con is_active mediante AND, y
+    como archivar pone is_active en falso el filtro devolvía el conjunto vacío
+    por construcción.
+    """
     form_id, _ = await crear_formulario_iciq(client)
+    otro_id, _ = await crear_formulario_iciq(client)
     await client.delete(f"{ADMIN}/forms/{form_id}")
 
     r = await client.get(f"{ADMIN}/forms", params={"status": "archived"})
-    assert r.json()["items"] == []
+    ids = [f["form_id"] for f in r.json()["items"]]
+    assert form_id in ids
+    assert otro_id not in ids
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -8,7 +8,7 @@ from sqlalchemy.orm import selectinload
 from app.db.session import get_db
 from app.models.clinical import (
     ClinicalForm, UserSubmission, SubmissionAnswer, FormSection, FormQuestion,
-    ScoringRule, ClinicalAlert, Target
+    ScoringRule, ClinicalAlert, FormStatus, Target
 )
 from app.models.user import User
 from app.schemas.clinical import FormResponse, SubmissionCreate, SubmissionResponse, SubmissionUpdate, ClinicalSnapshotResponse
@@ -44,12 +44,16 @@ async def list_forms(
         .selectinload(FormSection.questions)
         .selectinload(FormQuestion.options)
     ).where(
-        ClinicalForm.is_active == True
+        ClinicalForm.is_active == True,
+        # Sólo lo publicado llega a la usuaria. Antes se filtraba únicamente por
+        # is_active, de modo que un borrador a medio escribir quedaba visible
+        # apenas se creaba y el acto de publicar no existía (F2).
+        ClinicalForm.status == FormStatus.ACTIVE,
     )
-    
+
     # 3. Apply Filtering
     from sqlalchemy import or_
-    
+
     # Always allow forms with "todas" target (case-insensitive) OR forms with NO targets assigned
     filter_conditions = [
         ClinicalForm.targets.any(Target.code.ilike("todas")),
@@ -91,6 +95,9 @@ async def get_form_schema(
         )
         .where(ClinicalForm.code == code)
         .where(ClinicalForm.is_active == True)
+        # Mismo criterio que el listado: un borrador no debe poder abrirse
+        # adivinando su código.
+        .where(ClinicalForm.status == FormStatus.ACTIVE)
     )
     form = result.scalars().first()
     if not form:
