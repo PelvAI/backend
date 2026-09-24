@@ -6,7 +6,7 @@ This module defines the database models for the clinical questionnaire system,
 supporting dynamic form creation, conditional logic, weighted scoring, and alerts.
 """
 
-from sqlalchemy import Column, String, Boolean, DateTime, ForeignKey, Enum, Integer, Text, Float
+from sqlalchemy import Column, String, Boolean, DateTime, ForeignKey, Enum, Integer, Text, Float, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import relationship
 from app.db.session import Base
@@ -235,6 +235,10 @@ class FormQuestion(Base):
     
     # Legacy config (for backwards compatibility)
     config = Column(JSONB)
+
+    # Archivar en lugar de destruir: una pregunta ya respondida es evidencia
+    # clínica, y borrarla además rompía con una violación de clave foránea.
+    is_active = Column(Boolean, default=True, nullable=False, server_default="true")
     
     order_index = Column(Integer, default=0)
     
@@ -307,6 +311,10 @@ class ScoringRule(Base):
     
     # Context-Aware Scoring (Phase 10)
     target_id = Column(UUID(as_uuid=True), ForeignKey("targets.target_id", ondelete="SET NULL"), nullable=True)
+
+    # Igual que en las preguntas: una regla que ya disparó alertas clínicas se
+    # archiva, no se destruye.
+    is_active = Column(Boolean, default=True, nullable=False, server_default="true")
     
     order_index = Column(Integer, default=0)
     
@@ -384,6 +392,15 @@ class SubmissionAnswer(Base):
     Stores both the raw value and calculated score.
     """
     __tablename__ = "submission_answers"
+    # Una pregunta tiene una sola respuesta por evaluación. Antes guardar el
+    # borrador insertaba una fila nueva cada vez y el puntaje pasaba a depender
+    # del orden del iterado (F20).
+    __table_args__ = (
+        UniqueConstraint(
+            "submission_id", "question_id",
+            name="uq_submission_answers_submission_question",
+        ),
+    )
     
     answer_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     submission_id = Column(UUID(as_uuid=True), ForeignKey("user_submissions.submission_id", ondelete="CASCADE"), nullable=False)

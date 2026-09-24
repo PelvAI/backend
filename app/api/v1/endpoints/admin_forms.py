@@ -15,9 +15,9 @@ from app.db.session import get_db
 from app.api.deps import get_current_admin
 from app.models.user import User
 from app.models.clinical import (
-    ClinicalForm, FormSection, FormQuestion, AnswerOption, 
-    ScoringRule, FormStatus, TargetType, FrecuenciaType, DisparadorType,
-    QuestionType, ValueType, ScoreMode, UIHint, AlertType
+    ClinicalForm, FormSection, FormQuestion, AnswerOption, ClinicalAlert,
+    ScoringRule, FormStatus, FrecuenciaType, DisparadorType, SubmissionAnswer,
+    QuestionType, ValueType, ScoreMode, UIHint, AlertType, UserSubmission
 )
 from app.schemas.clinical import TargetCreate, TargetUpdate, TargetResponse
 from pydantic import BaseModel, Field
@@ -229,7 +229,11 @@ class FormDetailResponse(BaseModel):
     updated_at: Optional[datetime]
     sections: List[SectionResponse] = []
     scoring_rules: List[ScoringRuleResponse] = []
-    
+    # Cuántas evaluaciones se respondieron con este formulario. Editarlo cuando
+    # hay respuestas cambia el significado del histórico, así que quien edita
+    # tiene que saberlo (F11).
+    submission_count: int = 0
+
     class Config:
         from_attributes = True
 
@@ -525,17 +529,26 @@ async def get_form(
         .where(ClinicalForm.form_id == form_id)
         .options(
             selectinload(ClinicalForm.sections)
-            .selectinload(FormSection.questions)
+            # El editor tampoco muestra lo archivado.
+            .selectinload(FormSection.questions.and_(FormQuestion.is_active == True))
             .selectinload(FormQuestion.options),
-            selectinload(ClinicalForm.scoring_rules),
+            selectinload(ClinicalForm.scoring_rules.and_(ScoringRule.is_active == True)),
             selectinload(ClinicalForm.targets)
         )
     )
     form = result.scalar()
-    
+
     if not form:
         raise HTTPException(status_code=404, detail="Form not found")
-    
+
+    # Atributo suelto que Pydantic recoge al serializar: avisa a quien edita
+    # que hay respuestas en juego.
+    form.submission_count = await db.scalar(
+        select(func.count(UserSubmission.submission_id)).where(
+            UserSubmission.form_id == form_id
+        )
+    ) or 0
+
     return form
 
 
@@ -630,6 +643,18 @@ async def publish_form(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Cannot publish a form with no questions",
         )
+
+    # Republicar un formulario que ya tiene evaluaciones respondidas abre una
+    # versión nueva, para que se pueda distinguir bajo cuál se respondió cada
+    # una. No preserva la definición anterior —eso exige otro diseño— pero al
+    # menos deja la deriva a la vista en lugar de ocultarla (F11).
+    respondidas = await db.scalar(
+        select(func.count(UserSubmission.submission_id)).where(
+            UserSubmission.form_id == form_id
+        )
+    )
+    if respondidas and form.status != FormStatus.ACTIVE:
+        form.version = (form.version or 1) + 1
 
     form.status = FormStatus.ACTIVE
     form.is_active = True
@@ -869,12 +894,28 @@ async def delete_question(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_admin)
 ):
-    """Delete a question."""
+    """
+    Eliminar una pregunta, o archivarla si ya fue respondida.
+
+    Borrarla físicamente destruiría evidencia clínica y además rompía: la clave
+    foránea de las respuestas no declara ondelete, así que la base rechazaba el
+    borrado y el error subía sin manejar como 500 (F7).
+    """
     question = await db.get(FormQuestion, question_id)
     if not question:
         raise HTTPException(status_code=404, detail="Question not found")
-    
-    await db.delete(question)
+
+    respondida = await db.scalar(
+        select(func.count(SubmissionAnswer.answer_id)).where(
+            SubmissionAnswer.question_id == question_id
+        )
+    )
+
+    if respondida:
+        question.is_active = False
+    else:
+        await db.delete(question)
+
     await db.commit()
 
 
@@ -1013,10 +1054,25 @@ async def delete_scoring_rule(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_admin)
 ):
-    """Delete a scoring rule."""
+    """
+    Eliminar una regla, o archivarla si ya disparó alertas clínicas.
+
+    Mismo criterio que con las preguntas: una alerta registrada es evidencia y
+    su regla no puede desaparecer (F8).
+    """
     rule = await db.get(ScoringRule, rule_id)
     if not rule:
         raise HTTPException(status_code=404, detail="Scoring rule not found")
+
+    uso = await db.scalar(
+        select(func.count(ClinicalAlert.alert_id)).where(
+            ClinicalAlert.rule_id == rule_id
+        )
+    )
+    if uso:
+        rule.is_active = False
+        await db.commit()
+        return
     
 # =============================================================================
 # SCORING SIMULATION
@@ -1059,9 +1115,9 @@ async def simulate_scoring(
             select(ClinicalForm)
             .where(ClinicalForm.form_id == form_id)
             .options(
-                selectinload(ClinicalForm.scoring_rules),
+                selectinload(ClinicalForm.scoring_rules.and_(ScoringRule.is_active == True)),
                 selectinload(ClinicalForm.sections)
-                .selectinload(FormSection.questions)
+                .selectinload(FormSection.questions.and_(FormQuestion.is_active == True))
                 .selectinload(FormQuestion.options)
             )
         )

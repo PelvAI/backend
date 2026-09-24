@@ -639,11 +639,14 @@ async def test_f17_el_puntaje_total_solo_reconoce_los_nombres_de_iciq(client, us
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-async def test_f20_guardar_dos_veces_duplica_las_respuestas(client, user, db_session):
+async def test_f20_corregir_una_respuesta_la_reemplaza(client, user, db_session):
     """
-    save_answers inserta en vez de actualizar.
+    CERRADO en la fase 4. save_answers insertaba una fila nueva cada vez, así
+    que corregir una respuesta dejaba las dos versiones y el puntaje pasaba a
+    depender del orden del iterado.
 
-    Al cerrar F20: la segunda escritura debe reemplazar a la primera.
+    La restricción única en la base impide además que vuelva a pasar por otro
+    camino.
     """
     from sqlalchemy import func, select
 
@@ -669,17 +672,25 @@ async def test_f20_guardar_dos_veces_duplica_las_respuestas(client, user, db_ses
             SubmissionAnswer.submission_id == uuid.UUID(sub_id)
         )
     )
-    assert total == 2  # quedan las dos versiones de la misma pregunta
+    assert total == 1
+
+    guardada = await db_session.scalar(
+        select(SubmissionAnswer).where(
+            SubmissionAnswer.submission_id == uuid.UUID(sub_id)
+        )
+    )
+    assert guardada.value == "diario"  # la corrección, no la primera
 
 
-async def test_f21_se_puede_cerrar_la_evaluacion_de_otra_usuaria(
+async def test_f21_no_se_puede_tocar_la_evaluacion_de_otra_usuaria(
     client, user, otra_usuaria
 ):
     """
-    Ni save_answers ni finalize_submission comparan contra la usuaria
-    autenticada.
+    CERRADO en la fase 4. Con el identificador de una evaluación ajena se la
+    podía completar y cerrar.
 
-    Al cerrar F21: ambas deben responder 404 sobre una evaluación ajena.
+    Responde 404 y no 403 a propósito: un 403 confirmaría que esa evaluación
+    existe.
     """
     form_id, _ = await crear_formulario_iciq(client)
 
@@ -693,14 +704,22 @@ async def test_f21_se_puede_cerrar_la_evaluacion_de_otra_usuaria(
     r = await client.get(f"{ADMIN}/forms/{form_id}")
     qid = r.json()["sections"][0]["questions"][0]["question_id"]
 
-    # test_uid_123 escribe y cierra la evaluación de otra_uid_456
+    # test_uid_123 intenta escribir y cerrar la evaluación de otra_uid_456
     r = await client.put(
         f"{CLIN}/submissions/{sub_ajena}/answers",
         json={"answers": [{"question_id": qid, "value": "diario"}]},
     )
-    assert r.status_code == 200
+    assert r.status_code == 404
 
     r = await client.post(f"{CLIN}/submissions/{sub_ajena}/finalize")
+    assert r.status_code == 404
+
+    # Su dueña sí puede
+    r = await client.put(
+        f"{CLIN}/submissions/{sub_ajena}/answers",
+        json={"answers": [{"question_id": qid, "value": "diario"}]},
+        headers={"Authorization": "Bearer otra_uid_456"},
+    )
     assert r.status_code == 200
 
 
@@ -1273,3 +1292,179 @@ async def test_una_interpretacion_no_validada_viaja_marcada_como_provisoria(
     )
     assert r.json()["interpretation"] == "Alto"
     assert r.json()["interpretation_is_provisional"] is False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# F7 / F8 · Archivar en vez de destruir evidencia clínica
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+async def test_f7_borrar_una_pregunta_respondida_la_archiva(client, user, db_session):
+    """
+    CERRADO en la fase 4. El borrado era físico y la clave foránea de las
+    respuestas no declara ondelete, así que eliminar una pregunta ya contestada
+    rompía con una violación sin manejar.
+
+    Una respuesta es evidencia clínica: la pregunta se archiva y deja de
+    ofrecerse, pero no desaparece.
+    """
+    from sqlalchemy import func, select
+
+    from app.models.clinical import FormQuestion, SubmissionAnswer
+
+    form_id, _ = await crear_formulario_iciq(client)
+    await responder(
+        client, form_id, {"iciq_frecuencia": "diario", "iciq_cantidad": "poca"}
+    )
+
+    r = await client.get(f"{ADMIN}/forms/{form_id}")
+    qid = r.json()["sections"][0]["questions"][0]["question_id"]
+
+    r = await client.delete(f"{ADMIN}/questions/{qid}")
+    assert r.status_code == 204
+
+    # La pregunta sigue existiendo, archivada
+    pregunta = await db_session.get(FormQuestion, uuid.UUID(qid))
+    assert pregunta is not None
+    assert pregunta.is_active is False
+
+    # Y su respuesta también
+    quedan = await db_session.scalar(
+        select(func.count(SubmissionAnswer.answer_id)).where(
+            SubmissionAnswer.question_id == uuid.UUID(qid)
+        )
+    )
+    assert quedan == 1
+
+    # Pero deja de ofrecerse, en la app y en el editor
+    r = await client.get(f"{ADMIN}/forms/{form_id}")
+    assert qid not in [q["question_id"] for q in r.json()["sections"][0]["questions"]]
+
+
+async def test_una_pregunta_sin_respuestas_si_se_borra(client, user, db_session):
+    """Sin evidencia que preservar, el borrado es real."""
+    from app.models.clinical import FormQuestion
+
+    form_id, _ = await crear_formulario_iciq(client)
+    r = await client.get(f"{ADMIN}/forms/{form_id}")
+    qid = r.json()["sections"][0]["questions"][0]["question_id"]
+
+    r = await client.delete(f"{ADMIN}/questions/{qid}")
+    assert r.status_code == 204
+    assert await db_session.get(FormQuestion, uuid.UUID(qid)) is None
+
+
+async def test_archivar_una_pregunta_no_cambia_puntajes_ya_calculados(client, user):
+    """
+    Sutileza que importa: al recalcular una evaluación, lo que manda es qué
+    respondió la mujer, no si la pregunta sigue vigente. Archivar después no
+    puede reescribirle el puntaje.
+    """
+    form_id, _ = await crear_formulario_iciq(client)
+    sub_id, antes = await responder(
+        client, form_id, {"iciq_frecuencia": "diario", "iciq_cantidad": "moderada"}
+    )
+    assert antes["total_score"] == 7
+
+    r = await client.get(f"{ADMIN}/forms/{form_id}")
+    qid = r.json()["sections"][0]["questions"][0]["question_id"]
+    await client.delete(f"{ADMIN}/questions/{qid}")
+
+    r = await client.post(f"{CLIN}/submissions/{sub_id}/finalize")
+    assert r.json()["total_score"] == 7
+
+
+async def test_f8_borrar_una_regla_que_disparo_alertas_la_archiva(client, user):
+    """
+    CERRADO en la fase 4. Mismo criterio: una alerta clínica registrada es
+    evidencia y su regla no puede desaparecer.
+    """
+    form_id, _ = await crear_formulario_iciq(client)
+
+    r = await client.post(
+        f"{ADMIN}/forms/{form_id}/rules",
+        json={
+            "variable_name": "riesgo",
+            "formula": "iciq_frecuencia",
+            "alert_condition": "riesgo >= 1",
+            "alert_type": "derivacion_clinica",
+            "order_index": 1,
+        },
+    )
+    rule_id = r.json()["rule_id"]
+
+    await responder(
+        client, form_id, {"iciq_frecuencia": "diario", "iciq_cantidad": "poca"}
+    )
+
+    r = await client.delete(f"{ADMIN}/rules/{rule_id}")
+    assert r.status_code == 204
+
+    r = await client.get(f"{ADMIN}/forms/{form_id}")
+    assert rule_id not in [x["rule_id"] for x in r.json()["scoring_rules"]]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# F11 · Hacer visible la deriva de versiones
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+async def test_f11_la_evaluacion_registra_bajo_que_version_se_respondio(client, user):
+    """
+    CERRADO parcialmente en la fase 4. La columna existía para esto y nunca se
+    escribía, así que no había forma de saber bajo qué definición se respondió.
+
+    No preserva la definición anterior —eso exige otro diseño— pero deja la
+    deriva a la vista en lugar de ocultarla.
+    """
+    from app.models.clinical import UserSubmission
+
+    form_id, _ = await crear_formulario_iciq(client)
+
+    r = await client.post(f"{CLIN}/submissions/start", json={"form_id": form_id})
+    assert r.status_code == 200
+
+    r = await client.get(f"{ADMIN}/forms/{form_id}")
+    assert r.json()["version"] == 1
+
+
+async def test_f11_republicar_con_respuestas_abre_una_version_nueva(client, user):
+    """Republicar después de que alguien respondió distingue ambas épocas."""
+    form_id, _ = await crear_formulario_iciq(client)
+    await responder(
+        client, form_id, {"iciq_frecuencia": "diario", "iciq_cantidad": "poca"}
+    )
+
+    r = await client.get(f"{ADMIN}/forms/{form_id}")
+    assert r.json()["version"] == 1
+    assert r.json()["submission_count"] == 1
+
+    await client.post(f"{ADMIN}/forms/{form_id}/unpublish")
+    r = await client.post(f"{ADMIN}/forms/{form_id}/publish")
+    assert r.json()["version"] == 2
+
+
+async def test_republicar_sin_respuestas_no_infla_la_version(client, user):
+    """Mientras nadie respondió, editar y republicar no abre época nueva."""
+    form_id, _ = await crear_formulario_iciq(client)
+
+    await client.post(f"{ADMIN}/forms/{form_id}/unpublish")
+    r = await client.post(f"{ADMIN}/forms/{form_id}/publish")
+    assert r.json()["version"] == 1
+
+
+async def test_no_se_escriben_respuestas_sobre_una_evaluacion_cerrada(client, user):
+    """Una evaluación cerrada es histórico: no se le agregan respuestas."""
+    form_id, _ = await crear_formulario_iciq(client)
+    sub_id, _ = await responder(
+        client, form_id, {"iciq_frecuencia": "diario", "iciq_cantidad": "poca"}
+    )
+
+    r = await client.get(f"{ADMIN}/forms/{form_id}")
+    qid = r.json()["sections"][0]["questions"][0]["question_id"]
+
+    r = await client.put(
+        f"{CLIN}/submissions/{sub_id}/answers",
+        json={"answers": [{"question_id": qid, "value": "nunca"}]},
+    )
+    assert r.status_code == 409
