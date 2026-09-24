@@ -287,6 +287,11 @@ class ScoringRule(Base):
     
     # Interpretation ranges (optional)
     interpretation_ranges = Column(JSONB)  # e.g., {"0-5": "Leve", "6-10": "Moderado", ">10": "Severo"}
+
+    # Marca cuál de las reglas del formulario produce el puntaje total. Antes
+    # se adivinaba por el nombre de la variable, así que cualquier cuestionario
+    # que no se llamara como el ICIQ quedaba en cero sin avisar (F17).
+    is_total = Column(Boolean, default=False, nullable=False, server_default="false")
     
     # Alert configuration
     alert_condition = Column(Text)  # e.g., "value >= 10"
@@ -313,7 +318,9 @@ class ClinicalAlert(Base):
     alert_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.user_id"), nullable=False)
     submission_id = Column(UUID(as_uuid=True), ForeignKey("user_submissions.submission_id"), nullable=False)
-    rule_id = Column(UUID(as_uuid=True), ForeignKey("scoring_rules.rule_id"), nullable=False)
+    # Nulo cuando la alerta viene de la regla contextual de una opción, que no
+    # está asociada a ninguna ScoringRule.
+    rule_id = Column(UUID(as_uuid=True), ForeignKey("scoring_rules.rule_id"), nullable=True)
     
     alert_type = Column(Enum(AlertType), nullable=False)
     triggered_value = Column(Float)  # The value that triggered the alert

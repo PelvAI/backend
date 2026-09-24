@@ -8,7 +8,7 @@ from sqlalchemy.orm import selectinload
 from app.db.session import get_db
 from app.models.clinical import (
     ClinicalForm, UserSubmission, SubmissionAnswer, FormSection, FormQuestion,
-    TargetType, FormStatus, ScoringRule, ClinicalAlert, AlertType, ScoreMode, Target
+    ScoringRule, ClinicalAlert, Target
 )
 from app.models.user import User
 from app.schemas.clinical import FormResponse, SubmissionCreate, SubmissionResponse, SubmissionUpdate, ClinicalSnapshotResponse
@@ -180,77 +180,45 @@ async def finalize_submission(
     if not form:
         raise HTTPException(status_code=404, detail="Form definition not found")
 
-    # 1. Resolve Scores for Answers and Build Context
-    questions_map = {}
-    for section in form.sections:
-        for q in section.questions:
-            questions_map[q.question_id] = q
-            
-    resolved_context = {}
-    
-    for ans in submission.answers:
-        q = questions_map.get(ans.question_id)
-        if not q:
-            continue
-            
-        # Calc score for this answer
-        resolved_score = 0
-        raw_val = ans.value
-        
-        if q.score_mode == ScoreMode.OPTION_SCORE and q.options:
-            for opt in q.options:
-                # Compare as strings to be safe
-                if str(opt.value) == str(raw_val):
-                    resolved_score = opt.score
-                    break
-        elif q.score_mode == ScoreMode.VALUE_AS_SCORE:
-            try:
-                resolved_score = float(raw_val)
-            except:
-                resolved_score = 0
-        
-        # Update Answer Row
-        ans.score = int(resolved_score) # assuming integer col? It is Integer.
-        
-        # Update Context for Engine (if it has data_key)
-        if q.data_key:
-            resolved_context[q.data_key] = resolved_score
+    # 1. Los segmentos clínicos de la usuaria entran al motor: sin ellos, toda
+    #    regla y toda opción con condición de segmento se descarta (F15, F16).
+    user_target_ids = []
+    if current_user.profile:
+        await TagAutomationService.sync_profile_tags(db, current_user.profile.profile_id)
+        await db.refresh(current_user.profile, ["targets"])
+        user_target_ids = [str(t.target_id) for t in current_user.profile.targets]
 
-    # 2. Run Scoring Engine
+    questions = [q for section in form.sections for q in section.questions]
+    raw_answers = {ans.question_id: ans.value for ans in submission.answers}
+
+    # 2. Camino único, el mismo que ejecuta el simulador del panel.
     engine = ScoringEngine()
-    scores, alert_results = engine.process_rules(form.scoring_rules, resolved_context)
-    
-    # 3. Save Calculated Values
-    submission.total_score = scores.get('total_score') or scores.get('iciq_total') or 0 # Heuristic or define strict rule
-    # For ICIQ-SF specifically, we used 'iciq_total'. 
-    # General solution: store ALL scores in calculated_values
-    submission.calculated_values = scores
-    
-    # Update total_score strictly if there is a 'total' key, or first value?
-    # Let's try to find a key ending in '_total' or just use first.
-    if scores:
-        # Check rule mapping variable_name to see which is 'main'.
-        # For now, just Dump JSON. Mobile can parse.
-        # But UserSubmission has 'total_score' Float column.
-        # Let's pick 'iciq_total' if exists.
-        if 'iciq_total' in scores:
-            submission.total_score = scores['iciq_total']
-        elif 'total_score' in scores:
-             submission.total_score = scores['total_score']
-    
+    resultado = engine.score_submission(
+        questions, form.scoring_rules, raw_answers, user_target_ids=user_target_ids
+    )
+
+    # 3. Persistir el puntaje de cada respuesta
+    puntajes = {a.question_id: a.score for a in resultado.answer_scores}
+    for ans in submission.answers:
+        if ans.question_id in puntajes:
+            ans.score = int(puntajes[ans.question_id])
+
+    # 4. Guardar el resultado. calculated_values conserva su forma anterior a
+    #    propósito: es el contexto que RecommendationService usa para asignar
+    #    planes de entrenamiento.
+    submission.calculated_values = resultado.values
+    submission.total_score = resultado.total_score
+    submission.score_interpretation = resultado.interpretation
     submission.completed_at = datetime.utcnow()
-    
-    # 4. Create Clinical Alerts (Persist)
-    for res in alert_results:
-        # Check if alert already exists? (Maybe retrying finalization)
-        # For MVP, just add.
+
+    # 5. Create Clinical Alerts (Persist)
+    for res in resultado.alerts:
         alert = ClinicalAlert(
             user_id=current_user.user_id,
             submission_id=submission.submission_id,
-            rule_id=UUID(res.rule_id), # AlertResult stores str, convert to UUID
-            alert_type=res.alert_type, # Enum value matching
-            triggered_value=0, # We didn't capture WHAT value triggered it easily in AlertResult yet. 
-            # (TODO: Add triggered_value to AlertResult in scoring logic later)
+            rule_id=UUID(res.rule_id) if res.rule_id else None,
+            alert_type=res.alert_type,
+            triggered_value=res.triggered_value,
             is_shown_to_user=True # Default
         )
         db.add(alert)

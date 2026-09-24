@@ -13,19 +13,8 @@ Complementan tests/test_forms_flow.py, que cubre el recorrido completo.
 from types import SimpleNamespace
 from uuid import uuid4
 
-import pytest
-
-from app.services.scoring import ScoringEngine
-
-# Mientras F33 siga abierto, cualquier alerta sin tipo explícito revienta con
-# AttributeError. Estas dos pruebas afirman el comportamiento correcto, así que
-# se marcan como fallo esperado en modo estricto: al cerrar F33 pasarán a verde
-# y pytest exigirá quitarles la marca. No hay forma de olvidarse.
-f33_abierto = pytest.mark.xfail(
-    strict=True,
-    reason="F33: scoring.py usa AlertType.INFO, que no existe en el enum",
-    raises=AttributeError,
-)
+from app.models.clinical import AlertType
+from app.services.scoring import DEFAULT_ALERT_TYPE, RAW_SUFFIX, ScoringEngine
 
 
 def opcion(score, context_rules=None):
@@ -239,7 +228,6 @@ def test_una_regla_sin_segmento_aplica_a_todas():
     assert scores == {"t": 1}
 
 
-@f33_abierto
 def test_una_alerta_se_dispara_cuando_su_condicion_es_verdadera():
     e = ScoringEngine()
     reglas = [regla("total", formula="a + b", alert_condition="total >= 10")]
@@ -251,36 +239,50 @@ def test_una_alerta_se_dispara_cuando_su_condicion_es_verdadera():
     assert alertas == []
 
 
-@f33_abierto
-def test_la_alerta_no_registra_el_valor_que_la_disparo():
+def test_la_alerta_si_registra_el_valor_que_la_disparo():
     """
-    El nivel viene fijo en 'high' y el mensaje es genérico, sin el valor. Es lo
-    que deja triggered_value en cero al persistirla (F19).
-
-    Al cerrar F19: la alerta debe llevar el valor evaluado.
+    CERRADO en la fase 2 (F19 parcial): AlertResult lleva ahora el valor
+    evaluado, que es lo que se persiste en ClinicalAlert.triggered_value en vez
+    del cero fijo anterior.
     """
     e = ScoringEngine()
     reglas = [regla("total", formula="a", alert_condition="total >= 1")]
     _, alertas = e.process_rules(reglas, {"a": 42})
 
-    assert alertas[0].level == "high"
-    assert "42" not in alertas[0].message
+    assert alertas[0].triggered_value == 42
+    assert alertas[0].alert_type == DEFAULT_ALERT_TYPE
 
 
-def test_f29_las_reglas_de_interpretacion_nunca_se_evaluan():
+def test_f33_el_tipo_por_defecto_es_un_miembro_real_del_enum():
     """
-    interpretation_ranges se persiste desde el admin y process_rules no lo mira
-    siquiera: no forma parte de la firma ni del resultado. Por eso
-    UserSubmission.score_interpretation queda siempre nulo.
+    CERRADO en la fase 2. Antes se usaba AlertType.INFO, inexistente, y toda
+    alerta sin tipo explícito tumbaba el cierre con AttributeError.
+    """
+    assert DEFAULT_ALERT_TYPE in list(AlertType)
+    assert not hasattr(AlertType, "INFO")
 
-    Al cerrar F29: el motor debe devolver la interpretación junto al puntaje.
+
+def test_f29_los_rangos_de_interpretacion_se_traducen_a_una_etiqueta():
+    """
+    CERRADO en la fase 2. Los rangos se persistían desde el panel y nunca se
+    evaluaban, así que score_interpretation quedaba siempre nulo.
     """
     e = ScoringEngine()
-    r = regla("total", formula="a")
-    r.interpretation_ranges = {"0-5": "Leve", "6-10": "Moderado"}
+    assert e._interpret({"0-5": "Leve", "6-10": "Moderado"}, 8) == "Moderado"
+    assert e._interpret({"0-5": "Leve", "6-10": "Moderado"}, 3) == "Leve"
+    assert e._interpret({"0-5": "Leve", ">10": "Severo"}, 42) == "Severo"
+    assert e._interpret({">=10": "Alto"}, 10) == "Alto"
+    assert e._interpret({"<3": "Bajo"}, 2) == "Bajo"
+    assert e._interpret({"7": "Justo"}, 7) == "Justo"
 
-    scores, alertas = e.process_rules([r], {"a": 8})
 
-    assert scores == {"total": 8}
-    assert alertas == []
-    # No hay ningún canal por donde salga "Moderado".
+def test_f29_un_valor_fuera_de_todo_rango_no_inventa_etiqueta():
+    e = ScoringEngine()
+    assert e._interpret({"0-5": "Leve"}, 99) is None
+    assert e._interpret(None, 3) is None
+
+
+def test_f29_un_rango_mal_escrito_no_tumba_la_interpretacion():
+    """Un rango inválido se ignora y los demás siguen evaluándose."""
+    e = ScoringEngine()
+    assert e._interpret({"basura": "X", "0-5": "Leve"}, 3) == "Leve"

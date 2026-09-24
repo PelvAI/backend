@@ -142,6 +142,8 @@ class ScoringRuleCreate(BaseModel):
     alert_condition: Optional[str] = None  # e.g., "value >= 10"
     alert_type: Optional[AlertType] = None
     target_id: Optional[UUID] = None
+    # Marca esta regla como la que produce el puntaje total del formulario.
+    is_total: bool = False
     order_index: int = 0
 
 class ScoringRuleUpdate(BaseModel):
@@ -151,6 +153,7 @@ class ScoringRuleUpdate(BaseModel):
     alert_condition: Optional[str] = None
     alert_type: Optional[AlertType] = None
     target_id: Optional[UUID] = None
+    is_total: Optional[bool] = None
     order_index: Optional[int] = None
 
 class ScoringRuleResponse(BaseModel):
@@ -161,6 +164,7 @@ class ScoringRuleResponse(BaseModel):
     alert_condition: Optional[str]
     alert_type: Optional[AlertType]
     target_id: Optional[UUID]
+    is_total: bool = False
     order_index: Optional[int]
     
     class Config:
@@ -879,6 +883,7 @@ async def create_scoring_rule(
         variable_name=rule_data.variable_name,
         formula=rule_data.formula,
         interpretation_ranges=rule_data.interpretation_ranges,
+        is_total=rule_data.is_total,
         alert_condition=rule_data.alert_condition,
         alert_type=rule_data.alert_type,
         target_id=rule_data.target_id,
@@ -938,6 +943,11 @@ class SimulationRequest(BaseModel):
 class SimulationResponse(BaseModel):
     scores: Dict[str, Any]
     alerts: List[str]  # Just messages for simulation
+    # El simulador devuelve ahora lo mismo que persiste el cierre real, para
+    # que lo que ve la clínica sea comparable con lo que recibe la paciente.
+    total_score: float = 0.0
+    interpretation: Optional[str] = None
+    answer_scores: Dict[str, float] = {}
 
 @router.post("/forms/{form_id}/simulate", response_model=SimulationResponse)
 async def simulate_scoring(
@@ -967,58 +977,48 @@ async def simulate_scoring(
         if not form:
             raise HTTPException(status_code=404, detail="Form not found")
             
-        # 1.5. Resolve Raw Answers to Scores
-        # Helper to map data_key -> Question
-        questions_map = {}
-        for section in form.sections:
-            for q in section.questions:
-                if q.data_key:
-                    questions_map[q.data_key] = q
-        
-        resolved_context = {}
-        for key, raw_val in sim_data.answers.items():
-            if key in questions_map:
-                q = questions_map[key]
-                if q.score_mode == ScoreMode.OPTION_SCORE:
-                    # Find option
-                    # raw_val should match option.value
-                    found = False
-                    for opt in q.options:
-                        if opt.value == str(raw_val):
-                             resolved_context[key] = opt.score
-                    selected_opt = next((o for o in q.options if o.value == str(raw_val)), None)
-                    if selected_opt:
-                        # Use Engine to resolve score with context
-                        resolved_score = engine.resolve_answer_score(selected_opt, target_ids_str)
-                        resolved_context[key] = resolved_score
-                    else:
-                        resolved_context[key] = 0
-                elif q.score_mode == ScoreMode.VALUE_AS_SCORE:
-                    try:
-                        resolved_context[key] = float(raw_val)
-                    except:
-                        resolved_context[key] = 0
-                else:
-                    # Default: pass raw value (e.g. for logic)
-                    resolved_context[key] = raw_val
-            else:
-                 # Allow passing direct context variables that aren't answers
-                 try:
-                    resolved_context[key] = float(raw_val)
-                 except:
-                    resolved_context[key] = raw_val
+        # 2. Camino único: el mismo que ejecuta el cierre de una evaluación
+        #    real. Antes esto era una implementación paralela que aplicaba los
+        #    segmentos y las reglas por opción mientras producción no lo hacía,
+        #    de modo que lo simulado y lo calculado no coincidían (F14-F18).
+        preguntas = [q for sec in form.sections for q in sec.questions]
 
-        # 2. Run Scoring Engine
+        # La simulación indexa las respuestas por data_key; el motor trabaja
+        # por question_id.
+        por_data_key = {q.data_key: q for q in preguntas if q.data_key}
+        raw_answers = {}
+        desconocidas = []
+        for clave, valor in sim_data.answers.items():
+            pregunta = por_data_key.get(clave)
+            if pregunta is None:
+                desconocidas.append(clave)
+                continue
+            raw_answers[pregunta.question_id] = valor
+
+        if desconocidas:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Unknown data_keys for this form: {sorted(desconocidas)}",
+            )
+
         engine = ScoringEngine()
-        # Convert UUIDs to strings for the engine
-        target_ids_str = [str(t) for t in (sim_data.target_ids or [])]
-        scores, alert_results = engine.process_rules(form.scoring_rules, resolved_context, user_target_ids=target_ids_str)
-        
-        # 3. Format Response
-        return SimulationResponse(
-            scores=scores,
-            alerts=[f"[{a.level.upper()}] {a.message}" for a in alert_results]
+        resultado = engine.score_submission(
+            preguntas,
+            form.scoring_rules,
+            raw_answers,
+            user_target_ids=[str(t) for t in (sim_data.target_ids or [])],
         )
+
+        return SimulationResponse(
+            scores=resultado.values,
+            alerts=[f"[{a.level.upper()}] {a.message}" for a in resultado.alerts],
+            total_score=resultado.total_score,
+            interpretation=resultado.interpretation,
+            answer_scores={
+                a.data_key: a.score for a in resultado.answer_scores if a.data_key
+            },
+        )
+
     except Exception as e:
         import traceback
         print(f"SIMULATION ERROR: {e}\n{traceback.format_exc()}")

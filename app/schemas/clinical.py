@@ -94,6 +94,10 @@ class SubmissionResponse(BaseModel):
     created_at: datetime
     completed_at: Optional[datetime] = None
     total_score: Optional[float] = None
+    # La interpretación clínica del puntaje ("Leve", "Moderado", "Severo"),
+    # derivada de los rangos que define el formulario. Se persistía en la
+    # columna pero nunca se exponía, así que la app no podía mostrarla.
+    score_interpretation: Optional[str] = None
     calculated_values: Optional[Dict[str, Any]] = None
     model_config = ConfigDict(from_attributes=True)
 

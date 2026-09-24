@@ -58,6 +58,28 @@ async def otra_usuaria(db_session: AsyncSession) -> User:
 
 
 @pytest.fixture
+async def usuaria_embarazada(db_session: AsyncSession, user, target_embarazadas):
+    """
+    Usuaria a la que la segmentación automática le asigna PREGNANT.
+
+    No alcanza con vincular el segmento a mano: finalize_submission llama a
+    sync_profile_tags, que recalcula los segmentos desde las fechas clínicas y
+    reemplaza la colección. Hay que darle una fecha de última menstruación
+    coherente para que la automatización lo deduzca.
+    """
+    from datetime import datetime, timedelta
+
+    from sqlalchemy import select
+
+    perfil = await db_session.scalar(
+        select(Profile).where(Profile.user_id == user.user_id)
+    )
+    perfil.last_period_date = datetime.utcnow() - timedelta(weeks=10)
+    await db_session.commit()
+    return user
+
+
+@pytest.fixture
 async def target_embarazadas(db_session: AsyncSession) -> Target:
     t = Target(code="PREGNANT", name="Embarazadas", is_active=True)
     db_session.add(t)
@@ -402,14 +424,15 @@ async def test_f6_editar_y_borrar_segmentos(client, user, target_embarazadas):
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-async def test_f14_el_simulador_falla_con_preguntas_de_puntaje_por_opcion(
+async def test_f14_el_simulador_calcula_con_preguntas_de_puntaje_por_opcion(
     client, user
 ):
     """
-    `engine` y `target_ids_str` se usan 17 líneas antes de definirse. El
-    UnboundLocalError sale como 500 por el except genérico.
-
-    Al cerrar F14: 200 con el puntaje calculado.
+    CERRADO en la fase 2. `engine` y `target_ids_str` se usaban diecisiete
+    líneas antes de definirse, y el UnboundLocalError salía como 500 por el
+    except genérico. Además resolve_answer_score devolvía un diccionario que
+    iba tal cual al contexto de las fórmulas (F30), así que arreglar sólo el
+    orden no habría alcanzado.
     """
     form_id, _ = await crear_formulario_iciq(client)
 
@@ -417,18 +440,21 @@ async def test_f14_el_simulador_falla_con_preguntas_de_puntaje_por_opcion(
         f"{ADMIN}/forms/{form_id}/simulate",
         json={"answers": {"iciq_frecuencia": "diario", "iciq_cantidad": "moderada"}},
     )
-    assert r.status_code == 500
-    assert "engine" in r.json()["detail"]
+    assert r.status_code == 200
+    # 4 (diario) + 3 (moderada) = 7, el mismo número que calcula el cierre real
+    assert r.json()["scores"]["iciq_total"] == 7
+    assert r.json()["total_score"] == 7
 
 
-async def test_f15_las_reglas_por_segmento_se_saltean_en_produccion(
-    client, user, target_embarazadas, db_session
+async def test_f15_las_reglas_por_segmento_se_aplican_en_produccion(
+    client, usuaria_embarazada, target_embarazadas, db_session
 ):
     """
-    finalize_submission llama process_rules sin user_target_ids, así que toda
-    regla con target_id se descarta con `continue`.
+    CERRADO en la fase 2. finalize_submission llamaba a process_rules sin
+    user_target_ids, así que toda regla con target_id se descartaba con
+    `continue` y el scoring contextual estaba muerto en producción.
 
-    Al cerrar F15: la regla debe aplicarse si la usuaria tiene ese segmento.
+    Ahora los segmentos del perfil entran al motor.
     """
     form_id, _ = await crear_formulario_iciq(client)
 
@@ -447,18 +473,41 @@ async def test_f15_las_reglas_por_segmento_se_saltean_en_produccion(
         client, form_id, {"iciq_frecuencia": "diario", "iciq_cantidad": "poca"}
     )
 
-    assert "iciq_total" in sub["calculated_values"]
-    assert "riesgo_embarazo" not in sub["calculated_values"]  # nunca se evaluó
+    assert sub["calculated_values"]["iciq_total"] == 4
+    # 4 (diario) * 10 — la regla del segmento ahora sí corre
+    assert sub["calculated_values"]["riesgo_embarazo"] == 40
 
 
-async def test_f16_las_reglas_por_opcion_no_afectan_el_puntaje_real(
+async def test_f15_una_regla_de_segmento_no_aplica_a_quien_no_lo_tiene(
     client, user, target_embarazadas
 ):
-    """
-    finalize_submission calcula el puntaje en línea en vez de llamar a
-    resolve_answer_score, así que context_rules queda sin efecto.
+    """El lado negativo: sin el segmento, la regla sigue sin correr."""
+    form_id, _ = await crear_formulario_iciq(client)
 
-    Al cerrar F16: con el segmento activo el puntaje debe ser el sobrescrito.
+    r = await client.post(
+        f"{ADMIN}/forms/{form_id}/rules",
+        json={
+            "variable_name": "riesgo_embarazo",
+            "formula": "iciq_frecuencia * 10",
+            "target_id": str(target_embarazadas.target_id),
+            "order_index": 1,
+        },
+    )
+    assert r.status_code == 201
+
+    _, sub = await responder(
+        client, form_id, {"iciq_frecuencia": "diario", "iciq_cantidad": "poca"}
+    )
+    assert "riesgo_embarazo" not in sub["calculated_values"]
+
+
+async def test_f16_las_reglas_por_opcion_afectan_el_puntaje_real(
+    client, usuaria_embarazada, target_embarazadas
+):
+    """
+    CERRADO en la fase 2. finalize_submission calculaba el puntaje en línea en
+    vez de llamar a resolve_answer_score, así que las 371 líneas de la matriz
+    de reglas contextuales del panel no tenían efecto alguno.
     """
     form_id, section_id = await crear_formulario_iciq(client)
 
@@ -471,6 +520,11 @@ async def test_f16_las_reglas_por_opcion_no_afectan_el_puntaje_real(
     await crear_pregunta(
         client, section_id, "dolor", [("si", 1, reglas)], order_index=2
     )
+    r = await client.post(
+        f"{ADMIN}/forms/{form_id}/rules",
+        json={"variable_name": "dolor_efectivo", "formula": "dolor", "order_index": 2},
+    )
+    assert r.status_code == 201
 
     _, sub = await responder(
         client,
@@ -478,8 +532,8 @@ async def test_f16_las_reglas_por_opcion_no_afectan_el_puntaje_real(
         {"iciq_frecuencia": "nunca", "iciq_cantidad": "poca", "dolor": "si"},
     )
 
-    # El override de 99 se ignora: el total sigue siendo el puntaje base.
-    assert sub["calculated_values"]["iciq_total"] == 0
+    # El override de 99 se aplica sobre la opción, no sobre el puntaje base 1.
+    assert sub["calculated_values"]["dolor_efectivo"] == 99
 
 
 async def test_f17_el_puntaje_total_solo_reconoce_los_nombres_de_iciq(client, user):
@@ -746,7 +800,7 @@ async def test_un_codigo_activo_duplicado_sigue_siendo_rechazado(client, user):
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-async def test_f33_una_regla_con_alerta_sin_tipo_rompe_el_cierre(client, user):
+async def test_f33_una_regla_con_alerta_sin_tipo_cierra_bien(client, user):
     """
     scoring.py hace `rule.alert_type or AlertType.INFO`, y ese miembro no
     existe en el enum: solo hay DERIVACION_CLINICA, ACTIVAR_PLAN y SEGUIMIENTO.
@@ -756,8 +810,8 @@ async def test_f33_una_regla_con_alerta_sin_tipo_rompe_el_cierre(client, user):
     AttributeError. Es la funcionalidad central del motor clínico —generar
     derivaciones— y está caída.
 
-    Al cerrar F33: el cierre debe completarse y persistir la alerta con un tipo
-    por defecto válido.
+    CERRADO en la fase 2: el valor por defecto pasa a ser un miembro real del
+    enum, SEGUIMIENTO.
     """
     form_id, _ = await crear_formulario_iciq(client)
 
@@ -786,8 +840,9 @@ async def test_f33_una_regla_con_alerta_sin_tipo_rompe_el_cierre(client, user):
         json={"answers": [{"question_id": preguntas["iciq_frecuencia"], "value": "diario"}]},
     )
 
-    with pytest.raises(AttributeError, match="AlertType.*INFO"):
-        await client.post(f"{CLIN}/submissions/{sub_id}/finalize")
+    r = await client.post(f"{CLIN}/submissions/{sub_id}/finalize")
+    assert r.status_code == 200
+    assert r.json()["completed_at"] is not None
 
 
 async def test_una_alerta_con_tipo_explicito_si_cierra(client, user):
@@ -811,3 +866,170 @@ async def test_una_alerta_con_tipo_explicito_si_cierra(client, user):
     )
     assert sub["completed_at"] is not None
     assert sub["calculated_values"]["alerta_con_tipo"] == 4
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# El objetivo de la fase 2: un solo motor
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+async def test_el_simulador_y_el_cierre_real_dan_el_mismo_resultado(
+    client, usuaria_embarazada, target_embarazadas
+):
+    """
+    La razón de ser de la fase 2.
+
+    Antes eran dos implementaciones paralelas: el simulador aplicaba los
+    segmentos y las reglas por opción, producción no. La clínica validaba en el
+    panel una regla que no era la que después se le calculaba a la paciente.
+
+    Esta prueba alimenta el mismo caso a los dos caminos y exige que coincidan.
+    Si alguien vuelve a bifurcarlos, se pone en rojo.
+    """
+    form_id, section_id = await crear_formulario_iciq(client)
+
+    reglas = [
+        {
+            "conditions": {"targets": [str(target_embarazadas.target_id)]},
+            "override_score": 20,
+        }
+    ]
+    await crear_pregunta(client, section_id, "dolor", [("si", 1, reglas)], order_index=2)
+
+    r = await client.post(
+        f"{ADMIN}/forms/{form_id}/rules",
+        json={
+            "variable_name": "global",
+            "formula": "iciq_frecuencia + iciq_cantidad + dolor",
+            "is_total": True,
+            "order_index": 5,
+        },
+    )
+    assert r.status_code == 201
+
+    respuestas = {"iciq_frecuencia": "diario", "iciq_cantidad": "moderada", "dolor": "si"}
+
+    r = await client.post(
+        f"{ADMIN}/forms/{form_id}/simulate",
+        json={
+            "answers": respuestas,
+            "target_ids": [str(target_embarazadas.target_id)],
+        },
+    )
+    assert r.status_code == 200
+    simulado = r.json()
+
+    _, real = await responder(client, form_id, respuestas)
+
+    # 4 (diario) + 3 (moderada) + 20 (dolor sobrescrito por el segmento) = 27
+    assert simulado["scores"] == real["calculated_values"]
+    assert simulado["total_score"] == real["total_score"] == 27
+
+
+async def test_f17_el_formulario_declara_cual_es_su_puntaje_total(client, user):
+    """
+    CERRADO en la fase 2. La heurística buscaba 'iciq_total' y 'total_score'
+    por nombre, así que cualquier cuestionario que no se llamara como el ICIQ
+    quedaba en cero y sin aviso.
+    """
+    form_id, _ = await crear_formulario_iciq(client)
+
+    r = await client.get(f"{ADMIN}/forms/{form_id}")
+    rule_id = r.json()["scoring_rules"][0]["rule_id"]
+    r = await client.put(
+        f"{ADMIN}/rules/{rule_id}",
+        json={"variable_name": "severidad_global", "is_total": True},
+    )
+    assert r.status_code == 200
+
+    _, sub = await responder(
+        client, form_id, {"iciq_frecuencia": "diario", "iciq_cantidad": "mucha"}
+    )
+
+    assert sub["calculated_values"]["severidad_global"] == 10
+    assert sub["total_score"] == 10
+
+
+async def test_f17_los_formularios_viejos_conservan_su_puntaje(client, user):
+    """
+    Ningún formulario ya cargado tiene una regla marcada, así que el respaldo
+    por nombre se conserva a propósito: cambiarles el puntaje retroactivamente
+    sería peor que el bug.
+    """
+    form_id, _ = await crear_formulario_iciq(client)
+    _, sub = await responder(
+        client, form_id, {"iciq_frecuencia": "diario", "iciq_cantidad": "moderada"}
+    )
+    assert sub["total_score"] == 7
+
+
+async def test_f29_la_evaluacion_guarda_su_interpretacion_clinica(client, user):
+    """
+    CERRADO en la fase 2. Los rangos se persistían desde el panel y nunca se
+    evaluaban, así que score_interpretation quedaba siempre nulo.
+    """
+    form_id, _ = await crear_formulario_iciq(client)
+
+    r = await client.get(f"{ADMIN}/forms/{form_id}")
+    rule_id = r.json()["scoring_rules"][0]["rule_id"]
+    await client.put(
+        f"{ADMIN}/rules/{rule_id}",
+        json={
+            "is_total": True,
+            "interpretation_ranges": {"0-5": "Leve", "6-9": "Moderado", ">=10": "Severo"},
+        },
+    )
+
+    _, sub = await responder(
+        client, form_id, {"iciq_frecuencia": "diario", "iciq_cantidad": "moderada"}
+    )
+    assert sub["total_score"] == 7
+    assert sub["score_interpretation"] == "Moderado"
+
+
+async def test_f18_las_formulas_pueden_usar_el_valor_crudo_de_una_respuesta(
+    client, user
+):
+    """
+    CERRADO en la fase 2. El contexto sólo llevaba el puntaje, de modo que una
+    pregunta sin score_mode entraba como cero y no se podía escribir una
+    fórmula sobre lo que la usuaria efectivamente respondió.
+
+    El data_key a secas sigue siendo el puntaje: cambiar su significado habría
+    reescrito toda fórmula y toda regla de recomendación ya existente.
+    """
+    form_id, section_id = await crear_formulario_iciq(client)
+
+    r = await client.post(
+        f"{ADMIN}/sections/{section_id}/questions",
+        json={
+            "data_key": "edad",
+            "text_key": "q.edad",
+            "type": "text",
+            "score_mode": "none",
+            "order_index": 3,
+        },
+    )
+    assert r.status_code == 201
+
+    r = await client.post(
+        f"{ADMIN}/forms/{form_id}/rules",
+        json={
+            "variable_name": "mayor_de_40",
+            "formula": "1 if edad__valor > 40 else 0",
+            "order_index": 4,
+        },
+    )
+    assert r.status_code == 201
+
+    _, sub = await responder(
+        client,
+        form_id,
+        {"iciq_frecuencia": "nunca", "iciq_cantidad": "poca", "edad": 52},
+    )
+
+    # calculated_values guarda solo las variables que calculan las reglas: es
+    # el contexto que RecommendationService usa para asignar planes, y su forma
+    # se conserva a propósito.
+    assert "edad" not in sub["calculated_values"]
+    assert sub["calculated_values"]["mayor_de_40"] == 1
