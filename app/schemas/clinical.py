@@ -54,14 +54,22 @@ class TargetResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 class TargetCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     code: str
     name: str
     description: Optional[str] = None
 
 class TargetUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     name: Optional[str] = None
     description: Optional[str] = None
     is_active: Optional[bool] = None
+    # El código de un segmento es inmutable: la segmentación automática lo usa
+    # para reconocerlo, y cambiarlo la rompería en silencio. Se declara para
+    # aceptar sin romper a los clientes que todavía lo envían, y se descarta.
+    code: Optional[str] = None
 
 # --- Scoring Schemas ---
 class ScoringRuleResponse(BaseModel):

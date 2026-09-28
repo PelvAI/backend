@@ -1726,3 +1726,93 @@ async def test_f43_el_esquema_trae_los_campos_que_la_app_necesita(client, user):
 
     # Y el bloque clínico de la sección, que la app usa para agrupar
     assert r.json()["sections"][0]["bloque"] == "URIN"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Paso 1c · Cerrar la puerta a los campos desconocidos
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+async def test_1c_un_campo_desconocido_falla_en_vez_de_perderse(client, user):
+    """
+    Corrección de fondo de F1. El editor enviaba `target` donde el backend
+    esperaba `target_ids`; Pydantic descartaba el campo desconocido en silencio
+    y el segmento se perdía sin que nada avisara. Un bug así pudo vivir meses.
+
+    Ahora un campo mal escrito falla de forma visible.
+    """
+    r = await client.post(
+        f"{ADMIN}/forms",
+        json={
+            "code": f"TEST_{uuid.uuid4().hex[:8].upper()}",
+            "targetids": [],  # la clase de error que antes se tragaba
+        },
+    )
+    assert r.status_code == 422
+    assert "targetids" in r.text
+
+
+async def test_1c_el_panel_ya_desplegado_sigue_funcionando(
+    client, user, target_embarazadas
+):
+    """
+    Prohibir lo desconocido no puede romper al panel que ya está corriendo, que
+    todavía envía los campos en desuso. Son exactamente los cuerpos que arma la
+    versión de main.
+    """
+    code = f"TEST_{uuid.uuid4().hex[:8].upper()}"
+    r = await client.post(f"{ADMIN}/forms", json={
+        "code": code,
+        "title_key": "t",
+        "description_key": "d",
+        "target": "PREGNANT",
+        "frecuencia": "unica_vez",
+        "disparador": "al_registro",
+    })
+    assert r.status_code == 201, r.text
+    assert [t["code"] for t in r.json()["targets"]] == ["PREGNANT"]
+    form_id = r.json()["form_id"]
+
+    r = await client.post(
+        f"{ADMIN}/forms/{form_id}/sections",
+        json={"title_key": "Principal", "bloque": "MAIN", "order_index": 0},
+    )
+    assert r.status_code == 201, r.text
+    section_id = r.json()["section_id"]
+
+    r = await client.post(f"{ADMIN}/sections/{section_id}/questions", json={
+        "variable_name": "v", "text_key": "t", "type": "single",
+        "order_index": 0, "help_text": "h", "show_if": "", "is_required": False,
+        "options": [{"value": "a", "label_key": "A", "score": 1,
+                     "context_rules": None, "order_index": 0}],
+    })
+    assert r.status_code == 201, r.text
+    question_id = r.json()["question_id"]
+    option_id = r.json()["options"][0]["option_id"]
+
+    r = await client.put(f"{ADMIN}/options/{option_id}", json={
+        "value": "a", "label_key": "A", "score": 2,
+        "context_rules": None, "order_index": 0,
+    })
+    assert r.status_code == 200, r.text
+
+    r = await client.put(f"{ADMIN}/questions/{question_id}", json={
+        "variable_name": "v2", "text_key": "t2", "type": "single",
+        "order_index": 1, "help_text": "h2", "show_if": "", "is_required": True,
+    })
+    assert r.status_code == 200, r.text
+
+    r = await client.post(f"{ADMIN}/forms/{form_id}/rules", json={
+        "variable_name": "total", "formula": "1",
+        "alert_condition": "", "alert_type": None,
+        "target_id": None, "order_index": 0,
+    })
+    assert r.status_code == 201, r.text
+
+    # Editar un segmento enviando su código, que el panel viejo incluye
+    r = await client.put(f"{ADMIN}/targets/{target_embarazadas.target_id}", json={
+        "code": "OTRO_CODIGO", "name": "Gestantes", "description": "d",
+    })
+    assert r.status_code == 200, r.text
+    assert r.json()["name"] == "Gestantes"
+    assert r.json()["code"] == "PREGNANT"  # inmutable

@@ -20,8 +20,19 @@ from app.models.clinical import (
     QuestionType, ValueType, ScoreMode, UIHint, AlertType, UserSubmission
 )
 from app.schemas.clinical import TargetCreate, TargetUpdate, TargetResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from datetime import datetime
+
+# Los esquemas de escritura rechazan campos desconocidos. Es la corrección de
+# fondo de F1: el editor enviaba `target` donde el backend esperaba
+# `target_ids`, Pydantic descartaba el campo desconocido en silencio y el
+# segmento se perdía sin que nada avisara. Con esto, un campo mal escrito falla
+# de forma visible en vez de perderse.
+#
+# Los campos en desuso siguen DECLARADOS a propósito, no eliminados: prohibir
+# lo desconocido no debe romper al panel que ya está desplegado y todavía los
+# envía. Se quitan cuando no quede ninguna versión vieja en uso.
+ESTRICTO = ConfigDict(extra="forbid")
 
 router = APIRouter()
 
@@ -32,6 +43,7 @@ router = APIRouter()
 
 # --- Answer Options ---
 class OptionCreate(BaseModel):
+    model_config = ESTRICTO
     value: str
     label_key: Optional[str] = None
     score: int = 0
@@ -39,6 +51,7 @@ class OptionCreate(BaseModel):
     order_index: int = 0
 
 class OptionUpdate(BaseModel):
+    model_config = ESTRICTO
     value: Optional[str] = None
     label_key: Optional[str] = None
     score: Optional[int] = None
@@ -61,6 +74,7 @@ class OptionResponse(BaseModel):
 
 # --- Questions ---
 class QuestionCreate(BaseModel):
+    model_config = ESTRICTO
     id_pregunta: Optional[str] = None  # e.g., URIN01_DISPARADORA
     variable_name: Optional[str] = None  # Human readable name
     data_key: Optional[str] = None  # For formulas: iciq_frecuencia
@@ -77,6 +91,7 @@ class QuestionCreate(BaseModel):
     options: Optional[List[OptionCreate]] = None
 
 class QuestionUpdate(BaseModel):
+    model_config = ESTRICTO
     id_pregunta: Optional[str] = None
     variable_name: Optional[str] = None
     data_key: Optional[str] = None
@@ -114,11 +129,13 @@ class QuestionResponse(BaseModel):
 
 # --- Sections ---
 class SectionCreate(BaseModel):
+    model_config = ESTRICTO
     title_key: Optional[str] = None
     bloque: Optional[str] = None  # e.g., "URIN", "PROL"
     order_index: int = 0
 
 class SectionUpdate(BaseModel):
+    model_config = ESTRICTO
     title_key: Optional[str] = None
     bloque: Optional[str] = None
     order_index: Optional[int] = None
@@ -136,6 +153,7 @@ class SectionResponse(BaseModel):
 
 # --- Scoring Rules ---
 class ScoringRuleCreate(BaseModel):
+    model_config = ESTRICTO
     variable_name: str  # e.g., "iciq_total"
     formula: Optional[str] = None  # e.g., "iciq_frecuencia + iciq_cantidad"
     interpretation_ranges: Optional[dict] = None
@@ -149,6 +167,7 @@ class ScoringRuleCreate(BaseModel):
     order_index: int = 0
 
 class ScoringRuleUpdate(BaseModel):
+    model_config = ESTRICTO
     variable_name: Optional[str] = None
     formula: Optional[str] = None
     interpretation_ranges: Optional[dict] = None
@@ -178,24 +197,26 @@ class ScoringRuleResponse(BaseModel):
 # --- Forms ---
 # --- Forms ---
 class FormCreate(BaseModel):
+    model_config = ESTRICTO
     code: str
     title_key: Optional[str] = None
     description_key: Optional[str] = None
     target_ids: List[UUID] = []
-    # TRANSICIÓN (fase 1): el editor todavía envía el código del segmento en
-    # singular. Se acepta para no romperlo mientras migra a target_ids; al
-    # completarse el paso 1c este campo se elimina y entra extra="forbid".
+    # EN DESUSO: el código del segmento en singular. El editor actual envía
+    # target_ids; esto queda declarado sólo para no rechazar a un panel viejo
+    # que todavía lo mande. Se resuelve igual, así que nada se pierde.
     target: Optional[str] = None
     frecuencia: FrecuenciaType = FrecuenciaType.UNICA_VEZ
     disparador: DisparadorType = DisparadorType.AL_REGISTRO
 
 class FormUpdate(BaseModel):
+    model_config = ESTRICTO
     code: Optional[str] = None
     title_key: Optional[str] = None
     description_key: Optional[str] = None
     status: Optional[FormStatus] = None
     target_ids: Optional[List[UUID]] = None
-    target: Optional[str] = None  # TRANSICIÓN (fase 1), ver FormCreate
+    target: Optional[str] = None  # EN DESUSO, ver FormCreate
     frecuencia: Optional[FrecuenciaType] = None
     disparador: Optional[DisparadorType] = None
 
@@ -293,6 +314,10 @@ async def update_target(
         raise HTTPException(status_code=404, detail="Target not found")
 
     for field, value in target_in.model_dump(exclude_unset=True).items():
+        # El código es inmutable: se acepta en el cuerpo para no rechazar a un
+        # panel viejo, pero no se aplica.
+        if field == "code":
+            continue
         setattr(target, field, value)
 
     await db.commit()
@@ -1112,6 +1137,7 @@ from app.services.scoring import ScoringEngine
 from typing import List, Optional
 
 class SimulationRequest(BaseModel):
+    model_config = ESTRICTO
     answers: Dict[str, Any]  # Key=data_key (e.g., "frecuencia": 3)
     target_ids: Optional[List[UUID]] = None # Context for scoring
 
