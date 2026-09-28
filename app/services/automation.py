@@ -10,10 +10,17 @@ from app.models.clinical import Target
 
 class TagAutomationService:
     @staticmethod
-    async def sync_profile_tags(db: AsyncSession, profile_id: UUID) -> Profile:
+    async def sync_profile_tags(
+        db: AsyncSession, profile_id: UUID, *, commit: bool = True
+    ) -> Profile:
         """
         Calculates and updates clinical tags (Targets) for a user profile
         based on their clinical dates (due_date, delivery_date, etc.).
+
+        `commit=False` deja la transacción abierta para quien llama. El cierre
+        de una evaluación necesita eso: confirmar acá partía su transacción en
+        dos y dejaba los segmentos actualizados aunque el cierre fallara
+        después (F36).
         """
         # 1. Fetch profile with current targets
         result = await db.execute(
@@ -47,8 +54,11 @@ class TagAutomationService:
 
         # 5. Update collection (SQLAlchemy handles the join table)
         profile.targets = desired_targets
-        
-        await db.commit()
+
+        if commit:
+            await db.commit()
+        else:
+            await db.flush()
         await db.refresh(profile, ["targets"])
         return profile
 

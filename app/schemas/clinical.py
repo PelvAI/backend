@@ -21,6 +21,15 @@ class QuestionResponse(BaseModel):
     text_key: Optional[str] = None
     ui_hint: Optional[str] = None
     config: Optional[Dict[str, Any]] = None
+
+    # Sin estos cuatro la app no puede hacer su trabajo: evaluaba condiciones
+    # que nunca recibía, exigía respuestas obligatorias que no sabía cuáles
+    # eran, y descartaba las ayudas que alguien escribió en el editor (F43).
+    show_if: Optional[str] = None
+    is_required: bool = False
+    help_text: Optional[str] = None
+    placeholder: Optional[str] = None
+
     order_index: int = 0
     options: List[OptionResponse] = []
     model_config = ConfigDict(from_attributes=True)
@@ -28,6 +37,9 @@ class QuestionResponse(BaseModel):
 class SectionResponse(BaseModel):
     section_id: UUID
     title_key: Optional[str] = None
+    # Agrupación clínica de la sección (URIN, PROL...). La app la necesita para
+    # poder mostrar los resultados por bloque, y no se exponía.
+    bloque: Optional[str] = None
     order_index: int
     questions: List[QuestionResponse]
     model_config = ConfigDict(from_attributes=True)
@@ -42,14 +54,22 @@ class TargetResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 class TargetCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     code: str
     name: str
     description: Optional[str] = None
 
 class TargetUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     name: Optional[str] = None
     description: Optional[str] = None
     is_active: Optional[bool] = None
+    # El código de un segmento es inmutable: la segmentación automática lo usa
+    # para reconocerlo, y cambiarlo la rompería en silencio. Se declara para
+    # aceptar sin romper a los clientes que todavía lo envían, y se descarta.
+    code: Optional[str] = None
 
 # --- Scoring Schemas ---
 class ScoringRuleResponse(BaseModel):
@@ -75,6 +95,15 @@ class FormResponse(BaseModel):
     disparador: Optional[str] = None
     sections: List[SectionResponse] = []
     scoring_rules: List[ScoringRuleResponse] = []
+
+    # Cuándo le corresponde este cuestionario a quien pregunta. Antes el
+    # listado devolvía todo lo publicado sin mirar si ya se había respondido,
+    # así que la app no podía distinguir lo pendiente de lo hecho (F5, F25).
+    availability: str = "disponible"
+    last_completed_at: Optional[datetime] = None
+    next_available_at: Optional[datetime] = None
+    is_blocking: bool = False
+
     model_config = ConfigDict(from_attributes=True)
 
 # --- Submission Schemas ---
@@ -94,6 +123,10 @@ class SubmissionResponse(BaseModel):
     created_at: datetime
     completed_at: Optional[datetime] = None
     total_score: Optional[float] = None
+    # La interpretación clínica del puntaje ("Leve", "Moderado", "Severo"),
+    # derivada de los rangos que define el formulario. Se persistía en la
+    # columna pero nunca se exponía, así que la app no podía mostrarla.
+    score_interpretation: Optional[str] = None
     calculated_values: Optional[Dict[str, Any]] = None
     model_config = ConfigDict(from_attributes=True)
 

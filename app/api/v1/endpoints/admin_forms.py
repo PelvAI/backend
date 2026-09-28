@@ -15,13 +15,24 @@ from app.db.session import get_db
 from app.api.deps import get_current_admin
 from app.models.user import User
 from app.models.clinical import (
-    ClinicalForm, FormSection, FormQuestion, AnswerOption, 
-    ScoringRule, FormStatus, TargetType, FrecuenciaType, DisparadorType,
-    QuestionType, ValueType, ScoreMode, UIHint, AlertType
+    ClinicalForm, FormSection, FormQuestion, AnswerOption, ClinicalAlert,
+    ScoringRule, FormStatus, FrecuenciaType, DisparadorType, SubmissionAnswer,
+    QuestionType, ValueType, ScoreMode, UIHint, AlertType, UserSubmission
 )
 from app.schemas.clinical import TargetCreate, TargetUpdate, TargetResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from datetime import datetime
+
+# Los esquemas de escritura rechazan campos desconocidos. Es la corrección de
+# fondo de F1: el editor enviaba `target` donde el backend esperaba
+# `target_ids`, Pydantic descartaba el campo desconocido en silencio y el
+# segmento se perdía sin que nada avisara. Con esto, un campo mal escrito falla
+# de forma visible en vez de perderse.
+#
+# Los campos en desuso siguen DECLARADOS a propósito, no eliminados: prohibir
+# lo desconocido no debe romper al panel que ya está desplegado y todavía los
+# envía. Se quitan cuando no quede ninguna versión vieja en uso.
+ESTRICTO = ConfigDict(extra="forbid")
 
 router = APIRouter()
 
@@ -32,6 +43,7 @@ router = APIRouter()
 
 # --- Answer Options ---
 class OptionCreate(BaseModel):
+    model_config = ESTRICTO
     value: str
     label_key: Optional[str] = None
     score: int = 0
@@ -39,6 +51,7 @@ class OptionCreate(BaseModel):
     order_index: int = 0
 
 class OptionUpdate(BaseModel):
+    model_config = ESTRICTO
     value: Optional[str] = None
     label_key: Optional[str] = None
     score: Optional[int] = None
@@ -48,9 +61,11 @@ class OptionUpdate(BaseModel):
 class OptionResponse(BaseModel):
     option_id: UUID
     value: str
-    label_key: Optional[str]
+    label_key: Optional[str] = None
     score: int
-    context_rules: Optional[List[dict]]
+    # En Pydantic v2 un Optional sin default es obligatorio: sin el `= None`,
+    # cualquier construcción que omita el campo revienta con 500 (F26).
+    context_rules: Optional[List[dict]] = None
     order_index: int
     
     class Config:
@@ -59,6 +74,7 @@ class OptionResponse(BaseModel):
 
 # --- Questions ---
 class QuestionCreate(BaseModel):
+    model_config = ESTRICTO
     id_pregunta: Optional[str] = None  # e.g., URIN01_DISPARADORA
     variable_name: Optional[str] = None  # Human readable name
     data_key: Optional[str] = None  # For formulas: iciq_frecuencia
@@ -75,6 +91,7 @@ class QuestionCreate(BaseModel):
     options: Optional[List[OptionCreate]] = None
 
 class QuestionUpdate(BaseModel):
+    model_config = ESTRICTO
     id_pregunta: Optional[str] = None
     variable_name: Optional[str] = None
     data_key: Optional[str] = None
@@ -112,11 +129,13 @@ class QuestionResponse(BaseModel):
 
 # --- Sections ---
 class SectionCreate(BaseModel):
+    model_config = ESTRICTO
     title_key: Optional[str] = None
     bloque: Optional[str] = None  # e.g., "URIN", "PROL"
     order_index: int = 0
 
 class SectionUpdate(BaseModel):
+    model_config = ESTRICTO
     title_key: Optional[str] = None
     bloque: Optional[str] = None
     order_index: Optional[int] = None
@@ -134,21 +153,29 @@ class SectionResponse(BaseModel):
 
 # --- Scoring Rules ---
 class ScoringRuleCreate(BaseModel):
+    model_config = ESTRICTO
     variable_name: str  # e.g., "iciq_total"
     formula: Optional[str] = None  # e.g., "iciq_frecuencia + iciq_cantidad"
     interpretation_ranges: Optional[dict] = None
     alert_condition: Optional[str] = None  # e.g., "value >= 10"
     alert_type: Optional[AlertType] = None
     target_id: Optional[UUID] = None
+    # Marca esta regla como la que produce el puntaje total del formulario.
+    is_total: bool = False
+    # Si la clínica confirmó los rangos de interpretación. Nace en falso.
+    interpretation_validated: bool = False
     order_index: int = 0
 
 class ScoringRuleUpdate(BaseModel):
+    model_config = ESTRICTO
     variable_name: Optional[str] = None
     formula: Optional[str] = None
     interpretation_ranges: Optional[dict] = None
     alert_condition: Optional[str] = None
     alert_type: Optional[AlertType] = None
     target_id: Optional[UUID] = None
+    is_total: Optional[bool] = None
+    interpretation_validated: Optional[bool] = None
     order_index: Optional[int] = None
 
 class ScoringRuleResponse(BaseModel):
@@ -159,6 +186,8 @@ class ScoringRuleResponse(BaseModel):
     alert_condition: Optional[str]
     alert_type: Optional[AlertType]
     target_id: Optional[UUID]
+    is_total: bool = False
+    interpretation_validated: bool = False
     order_index: Optional[int]
     
     class Config:
@@ -168,19 +197,26 @@ class ScoringRuleResponse(BaseModel):
 # --- Forms ---
 # --- Forms ---
 class FormCreate(BaseModel):
+    model_config = ESTRICTO
     code: str
     title_key: Optional[str] = None
     description_key: Optional[str] = None
     target_ids: List[UUID] = []
+    # EN DESUSO: el código del segmento en singular. El editor actual envía
+    # target_ids; esto queda declarado sólo para no rechazar a un panel viejo
+    # que todavía lo mande. Se resuelve igual, así que nada se pierde.
+    target: Optional[str] = None
     frecuencia: FrecuenciaType = FrecuenciaType.UNICA_VEZ
     disparador: DisparadorType = DisparadorType.AL_REGISTRO
 
 class FormUpdate(BaseModel):
+    model_config = ESTRICTO
     code: Optional[str] = None
     title_key: Optional[str] = None
     description_key: Optional[str] = None
     status: Optional[FormStatus] = None
     target_ids: Optional[List[UUID]] = None
+    target: Optional[str] = None  # EN DESUSO, ver FormCreate
     frecuencia: Optional[FrecuenciaType] = None
     disparador: Optional[DisparadorType] = None
 
@@ -214,7 +250,11 @@ class FormDetailResponse(BaseModel):
     updated_at: Optional[datetime]
     sections: List[SectionResponse] = []
     scoring_rules: List[ScoringRuleResponse] = []
-    
+    # Cuántas evaluaciones se respondieron con este formulario. Editarlo cuando
+    # hay respuestas cambia el significado del histórico, así que quien edita
+    # tiene que saberlo (F11).
+    submission_count: int = 0
+
     class Config:
         from_attributes = True
 
@@ -260,9 +300,103 @@ async def list_targets(
     return result.scalars().all()
 
 
+@router.put("/targets/{target_id}", response_model=TargetResponse)
+async def update_target(
+    target_id: UUID,
+    target_in: TargetUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_admin)
+):
+    """Update a clinical target (segment)."""
+    from app.models.clinical import Target
+    target = await db.get(Target, target_id)
+    if not target:
+        raise HTTPException(status_code=404, detail="Target not found")
+
+    for field, value in target_in.model_dump(exclude_unset=True).items():
+        # El código es inmutable: se acepta en el cuerpo para no rechazar a un
+        # panel viejo, pero no se aplica.
+        if field == "code":
+            continue
+        setattr(target, field, value)
+
+    await db.commit()
+    await db.refresh(target)
+    return target
+
+
+@router.delete("/targets/{target_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_target(
+    target_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_admin)
+):
+    """
+    Soft delete a target.
+
+    Se desactiva en lugar de borrarse: los formularios y perfiles que lo
+    referencian conservan el vínculo histórico, y list_targets ya filtra por
+    is_active.
+    """
+    from app.models.clinical import Target
+    target = await db.get(Target, target_id)
+    if not target:
+        raise HTTPException(status_code=404, detail="Target not found")
+
+    target.is_active = False
+    await db.commit()
+
+
 # =============================================================================
 # FORM ENDPOINTS
 # =============================================================================
+
+
+async def _resolve_targets(
+    db: AsyncSession,
+    target_ids: Optional[List[UUID]] = None,
+    target_code: Optional[str] = None,
+):
+    """
+    Resuelve los Target a vincular a un formulario.
+
+    Acepta los dos contratos a propósito: `target_ids` es el definitivo, y
+    `target_code` es el que todavía envía el editor del admin. Es el paso de
+    expansión de la fase 1 — cuando el admin migre a target_ids se elimina la
+    segunda rama (ver F1).
+
+    Devuelve siempre una lista, y resuelve ANTES de que haya objetos pendientes
+    en la sesión: hacerlo después dispara un autoflush que persiste el
+    formulario a medio construir y rompe la asignación de la colección (F27).
+
+    Un target_id inexistente es un error: pedir un segmento que no existe y
+    recibir un formulario sin segmento es la misma falla silenciosa que F1.
+    El código en singular, en cambio, se resuelve con tolerancia: es la rama de
+    compatibilidad y no debe tumbar al editor si el segmento no está cargado.
+    """
+    from app.models.clinical import Target
+
+    if target_ids:
+        result = await db.execute(
+            select(Target).where(Target.target_id.in_(target_ids))
+        )
+        targets = list(result.scalars().all())
+
+        faltantes = set(target_ids) - {t.target_id for t in targets}
+        if faltantes:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Unknown target_ids: {sorted(str(t) for t in faltantes)}",
+            )
+        return targets
+
+    if target_code:
+        result = await db.execute(
+            select(Target).where(Target.code.ilike(target_code))
+        )
+        return list(result.scalars().all())
+
+    return []
 
 @router.get("/forms", response_model=FormPagination)
 async def list_forms(
@@ -280,16 +414,17 @@ async def list_forms(
     """
     from app.models.clinical import Target
 
-    # Base query for counting
-    count_query = select(func.count(ClinicalForm.form_id)).where(ClinicalForm.is_active == True)
-
-    # Base query for fetching (No eager load options to avoid async issues)
-    query = select(ClinicalForm).where(ClinicalForm.is_active == True)
-    
-    # Apply filters
+    # El estado gobierna la visibilidad, no is_active: archivar pone los dos en
+    # su lugar a la vez. Antes ambos se combinaban con AND, de modo que filtrar
+    # por ARCHIVED devolvía el conjunto vacío por construcción y un formulario
+    # archivado se volvía inalcanzable desde el panel (F9, F10).
     if status:
-        count_query = count_query.where(ClinicalForm.status == status)
-        query = query.where(ClinicalForm.status == status)
+        visibilidad = ClinicalForm.status == status
+    else:
+        visibilidad = ClinicalForm.status != FormStatus.ARCHIVED
+
+    count_query = select(func.count(ClinicalForm.form_id)).where(visibilidad)
+    query = select(ClinicalForm).where(visibilidad)
     
     if target_code:
         # Filter where form has the specific target
@@ -362,33 +497,30 @@ async def create_form(
     )
     existing_form = existing.scalar()
     
+    if existing_form and existing_form.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Form with code '{form_data.code}' already exists"
+        )
+
+    # Resolver los segmentos antes de tocar la sesión: ver _resolve_targets.
+    targets = await _resolve_targets(db, form_data.target_ids, form_data.target)
+
     if existing_form:
-        if not existing_form.is_active:
-            # Reactivate soft-deleted form
-            existing_form.is_active = True
-            existing_form.status = FormStatus.DRAFT
-            existing_form.title_key = form_data.title_key
-            existing_form.description_key = form_data.description_key
-            
-            # Handle Targets
-            if form_data.target_ids:
-                from app.models.clinical import Target
-                targets_res = await db.execute(select(Target).where(Target.target_id.in_(form_data.target_ids)))
-                existing_form.targets = targets_res.scalars().all()
-            
-            existing_form.frecuencia = form_data.frecuencia
-            existing_form.disparador = form_data.disparador
-            
-            await db.commit()
-            await db.refresh(existing_form)
-            
-            return await get_form(existing_form.form_id, db=db, current_user=current_user)
-        else:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Form with code '{form_data.code}' already exists"
-            )
-    
+        # Reactivate soft-deleted form
+        existing_form.is_active = True
+        existing_form.status = FormStatus.DRAFT
+        existing_form.title_key = form_data.title_key
+        existing_form.description_key = form_data.description_key
+        # Reactivar equivale a recrear, así que los segmentos se reemplazan
+        # siempre — incluso por una lista vacía (F4).
+        existing_form.targets = targets
+        existing_form.frecuencia = form_data.frecuencia
+        existing_form.disparador = form_data.disparador
+
+        await db.commit()
+        return await get_form(existing_form.form_id, db=db, current_user=current_user)
+
     form = ClinicalForm(
         code=form_data.code,
         title_key=form_data.title_key,
@@ -397,21 +529,13 @@ async def create_form(
         disparador=form_data.disparador,
         status=FormStatus.DRAFT,
         version=1,
-        is_active=True
+        is_active=True,
+        targets=targets,
     )
-    
-    db.add(form)
-    
-    # Link Targets
-    if form_data.target_ids:
-        from app.models.clinical import Target
-        targets_result = await db.execute(select(Target).where(Target.target_id.in_(form_data.target_ids)))
-        targets = targets_result.scalars().all()
-        form.targets = targets
 
+    db.add(form)
     await db.commit()
-    await db.refresh(form)
-    
+
     return await get_form(form.form_id, db=db, current_user=current_user)
 
 
@@ -429,18 +553,27 @@ async def get_form(
         select(ClinicalForm)
         .where(ClinicalForm.form_id == form_id)
         .options(
-            selectinload(ClinicalForm.sections)
-            .selectinload(FormSection.questions)
+            # El editor tampoco muestra lo archivado.
+            selectinload(ClinicalForm.sections.and_(FormSection.is_active == True))
+            .selectinload(FormSection.questions.and_(FormQuestion.is_active == True))
             .selectinload(FormQuestion.options),
-            selectinload(ClinicalForm.scoring_rules),
+            selectinload(ClinicalForm.scoring_rules.and_(ScoringRule.is_active == True)),
             selectinload(ClinicalForm.targets)
         )
     )
     form = result.scalar()
-    
+
     if not form:
         raise HTTPException(status_code=404, detail="Form not found")
-    
+
+    # Atributo suelto que Pydantic recoge al serializar: avisa a quien edita
+    # que hay respuestas en juego.
+    form.submission_count = await db.scalar(
+        select(func.count(UserSubmission.submission_id)).where(
+            UserSubmission.form_id == form_id
+        )
+    ) or 0
+
     return form
 
 
@@ -463,14 +596,16 @@ async def update_form(
         raise HTTPException(status_code=404, detail="Form not found")
     
     update_data = form_data.model_dump(exclude_unset=True)
-    
-    # Handle Targets
+
+    # Handle Targets. Una lista vacía explícita limpia los segmentos; no
+    # mandar el campo los deja como están (F4).
+    target_code = update_data.pop('target', None)
     if 'target_ids' in update_data:
         target_ids = update_data.pop('target_ids')
         if target_ids is not None:
-            from app.models.clinical import Target
-            targets_res = await db.execute(select(Target).where(Target.target_id.in_(target_ids)))
-            form.targets = targets_res.scalars().all()
+            form.targets = await _resolve_targets(db, target_ids, None)
+    elif target_code is not None:
+        form.targets = await _resolve_targets(db, None, target_code)
 
     for field, value in update_data.items():
         if hasattr(form, field):
@@ -505,6 +640,97 @@ async def delete_form(
 # =============================================================================
 # SECTION ENDPOINTS
 # =============================================================================
+
+@router.post("/forms/{form_id}/publish", response_model=FormDetailResponse)
+async def publish_form(
+    form_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_admin)
+):
+    """
+    Publicar un formulario: recién a partir de acá lo ven las usuarias.
+
+    Se exige al menos una pregunta. Publicar un cuestionario vacío no le sirve
+    a nadie y era justamente lo que pasaba solo antes de que el estado se
+    respetara (F2).
+    """
+    result = await db.execute(
+        select(ClinicalForm)
+        .where(ClinicalForm.form_id == form_id)
+        .options(selectinload(ClinicalForm.sections).selectinload(FormSection.questions))
+    )
+    form = result.scalars().first()
+    if not form:
+        raise HTTPException(status_code=404, detail="Form not found")
+
+    if not any(sec.questions for sec in form.sections):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot publish a form with no questions",
+        )
+
+    # Republicar un formulario que ya tiene evaluaciones respondidas abre una
+    # versión nueva, para que se pueda distinguir bajo cuál se respondió cada
+    # una. No preserva la definición anterior —eso exige otro diseño— pero al
+    # menos deja la deriva a la vista en lugar de ocultarla (F11).
+    respondidas = await db.scalar(
+        select(func.count(UserSubmission.submission_id)).where(
+            UserSubmission.form_id == form_id
+        )
+    )
+    if respondidas and form.status != FormStatus.ACTIVE:
+        form.version = (form.version or 1) + 1
+
+    form.status = FormStatus.ACTIVE
+    form.is_active = True
+    await db.commit()
+
+    return await get_form(form_id, db=db, current_user=current_user)
+
+
+@router.post("/forms/{form_id}/unpublish", response_model=FormDetailResponse)
+async def unpublish_form(
+    form_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_admin)
+):
+    """
+    Devolver un formulario a borrador: deja de mostrarse en la aplicación.
+
+    Las evaluaciones ya respondidas no se tocan; sólo deja de ofrecerse.
+    """
+    form = await db.get(ClinicalForm, form_id)
+    if not form:
+        raise HTTPException(status_code=404, detail="Form not found")
+
+    form.status = FormStatus.DRAFT
+    await db.commit()
+
+    return await get_form(form_id, db=db, current_user=current_user)
+
+
+@router.post("/forms/{form_id}/restore", response_model=FormDetailResponse)
+async def restore_form(
+    form_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_admin)
+):
+    """
+    Sacar un formulario del archivo y devolverlo a borrador.
+
+    Vuelve como borrador a propósito: quien lo archivó tuvo un motivo, así que
+    reaparecer en la aplicación debe ser una decisión aparte (F9).
+    """
+    form = await db.get(ClinicalForm, form_id)
+    if not form:
+        raise HTTPException(status_code=404, detail="Form not found")
+
+    form.is_active = True
+    form.status = FormStatus.DRAFT
+    await db.commit()
+
+    return await get_form(form_id, db=db, current_user=current_user)
+
 
 @router.post("/forms/{form_id}/sections", response_model=SectionResponse, status_code=status.HTTP_201_CREATED)
 async def create_section(
@@ -571,12 +797,42 @@ async def delete_section(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_admin)
 ):
-    """Delete a section and all its questions."""
-    section = await db.get(FormSection, section_id)
+    """
+    Eliminar una sección, o archivarla si alguna de sus preguntas fue
+    respondida.
+
+    El borrado era físico y arrastraba las preguntas en cascada; como la clave
+    foránea de las respuestas no declara ondelete, eso rompía con una violación
+    sin manejar (F42).
+    """
+    result = await db.execute(
+        select(FormSection)
+        .where(FormSection.section_id == section_id)
+        .options(selectinload(FormSection.questions))
+    )
+    section = result.scalars().first()
     if not section:
         raise HTTPException(status_code=404, detail="Section not found")
-    
-    await db.delete(section)
+
+    ids = [q.question_id for q in section.questions]
+    respondidas = set()
+    if ids:
+        filas = await db.execute(
+            select(SubmissionAnswer.question_id)
+            .where(SubmissionAnswer.question_id.in_(ids))
+            .distinct()
+        )
+        respondidas = {fila[0] for fila in filas.all()}
+
+    if respondidas:
+        # Se conserva todo: la sección deja de ofrecerse y sus preguntas
+        # también, pero las respuestas siguen apuntando a algo que existe.
+        section.is_active = False
+        for q in section.questions:
+            q.is_active = False
+    else:
+        await db.delete(section)
+
     await db.commit()
 
 
@@ -624,6 +880,7 @@ async def create_question(
                     value=opt_data.value,
                     label_key=opt_data.label_key,
                     score=opt_data.score,
+                    context_rules=opt_data.context_rules,
                     order_index=opt_data.order_index
                 )
                 db.add(option)
@@ -647,13 +904,7 @@ async def create_question(
             ui_hint=question.ui_hint,
             is_required=question.is_required,
             order_index=question.order_index,
-            options=[OptionResponse(
-                option_id=o.option_id,
-                value=o.value,
-                label_key=o.label_key,
-                score=o.score,
-                order_index=o.order_index
-            ) for o in options]
+            options=[OptionResponse.model_validate(o) for o in options]
         )
     except Exception as e:
         # Log error in production
@@ -698,12 +949,28 @@ async def delete_question(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_admin)
 ):
-    """Delete a question."""
+    """
+    Eliminar una pregunta, o archivarla si ya fue respondida.
+
+    Borrarla físicamente destruiría evidencia clínica y además rompía: la clave
+    foránea de las respuestas no declara ondelete, así que la base rechazaba el
+    borrado y el error subía sin manejar como 500 (F7).
+    """
     question = await db.get(FormQuestion, question_id)
     if not question:
         raise HTTPException(status_code=404, detail="Question not found")
-    
-    await db.delete(question)
+
+    respondida = await db.scalar(
+        select(func.count(SubmissionAnswer.answer_id)).where(
+            SubmissionAnswer.question_id == question_id
+        )
+    )
+
+    if respondida:
+        question.is_active = False
+    else:
+        await db.delete(question)
+
     await db.commit()
 
 
@@ -796,6 +1063,8 @@ async def create_scoring_rule(
         variable_name=rule_data.variable_name,
         formula=rule_data.formula,
         interpretation_ranges=rule_data.interpretation_ranges,
+        is_total=rule_data.is_total,
+        interpretation_validated=rule_data.interpretation_validated,
         alert_condition=rule_data.alert_condition,
         alert_type=rule_data.alert_type,
         target_id=rule_data.target_id,
@@ -822,11 +1091,15 @@ async def update_scoring_rule(
     
     update_data = rule_data.model_dump(exclude_unset=True)
     for field, value in update_data.items():
+        # is_total es NOT NULL en la base: un null explícito en el cuerpo
+        # reventaría al commitear, así que se interpreta como "no marcada".
+        if field in ("is_total", "interpretation_validated") and value is None:
+            value = False
         setattr(rule, field, value)
-    
+
     await db.commit()
     await db.refresh(rule)
-    
+
     return rule
 
 
@@ -836,10 +1109,25 @@ async def delete_scoring_rule(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_admin)
 ):
-    """Delete a scoring rule."""
+    """
+    Eliminar una regla, o archivarla si ya disparó alertas clínicas.
+
+    Mismo criterio que con las preguntas: una alerta registrada es evidencia y
+    su regla no puede desaparecer (F8).
+    """
     rule = await db.get(ScoringRule, rule_id)
     if not rule:
         raise HTTPException(status_code=404, detail="Scoring rule not found")
+
+    uso = await db.scalar(
+        select(func.count(ClinicalAlert.alert_id)).where(
+            ClinicalAlert.rule_id == rule_id
+        )
+    )
+    if uso:
+        rule.is_active = False
+        await db.commit()
+        return
     
 # =============================================================================
 # SCORING SIMULATION
@@ -849,12 +1137,22 @@ from app.services.scoring import ScoringEngine
 from typing import List, Optional
 
 class SimulationRequest(BaseModel):
+    model_config = ESTRICTO
     answers: Dict[str, Any]  # Key=data_key (e.g., "frecuencia": 3)
     target_ids: Optional[List[UUID]] = None # Context for scoring
 
 class SimulationResponse(BaseModel):
     scores: Dict[str, Any]
     alerts: List[str]  # Just messages for simulation
+    # El simulador devuelve ahora lo mismo que persiste el cierre real, para
+    # que lo que ve la clínica sea comparable con lo que recibe la paciente.
+    total_score: Optional[float] = None
+    # Variables cuya fórmula no resolvió: quien diseña el cuestionario necesita
+    # verlas, no un cero silencioso.
+    uncomputed: List[str] = []
+    interpretation: Optional[str] = None
+    interpretation_is_provisional: bool = False
+    answer_scores: Dict[str, float] = {}
 
 @router.post("/forms/{form_id}/simulate", response_model=SimulationResponse)
 async def simulate_scoring(
@@ -873,9 +1171,9 @@ async def simulate_scoring(
             select(ClinicalForm)
             .where(ClinicalForm.form_id == form_id)
             .options(
-                selectinload(ClinicalForm.scoring_rules),
-                selectinload(ClinicalForm.sections)
-                .selectinload(FormSection.questions)
+                selectinload(ClinicalForm.scoring_rules.and_(ScoringRule.is_active == True)),
+                selectinload(ClinicalForm.sections.and_(FormSection.is_active == True))
+                .selectinload(FormSection.questions.and_(FormQuestion.is_active == True))
                 .selectinload(FormQuestion.options)
             )
         )
@@ -884,58 +1182,50 @@ async def simulate_scoring(
         if not form:
             raise HTTPException(status_code=404, detail="Form not found")
             
-        # 1.5. Resolve Raw Answers to Scores
-        # Helper to map data_key -> Question
-        questions_map = {}
-        for section in form.sections:
-            for q in section.questions:
-                if q.data_key:
-                    questions_map[q.data_key] = q
-        
-        resolved_context = {}
-        for key, raw_val in sim_data.answers.items():
-            if key in questions_map:
-                q = questions_map[key]
-                if q.score_mode == ScoreMode.OPTION_SCORE:
-                    # Find option
-                    # raw_val should match option.value
-                    found = False
-                    for opt in q.options:
-                        if opt.value == str(raw_val):
-                             resolved_context[key] = opt.score
-                    selected_opt = next((o for o in q.options if o.value == str(raw_val)), None)
-                    if selected_opt:
-                        # Use Engine to resolve score with context
-                        resolved_score = engine.resolve_answer_score(selected_opt, target_ids_str)
-                        resolved_context[key] = resolved_score
-                    else:
-                        resolved_context[key] = 0
-                elif q.score_mode == ScoreMode.VALUE_AS_SCORE:
-                    try:
-                        resolved_context[key] = float(raw_val)
-                    except:
-                        resolved_context[key] = 0
-                else:
-                    # Default: pass raw value (e.g. for logic)
-                    resolved_context[key] = raw_val
-            else:
-                 # Allow passing direct context variables that aren't answers
-                 try:
-                    resolved_context[key] = float(raw_val)
-                 except:
-                    resolved_context[key] = raw_val
+        # 2. Camino único: el mismo que ejecuta el cierre de una evaluación
+        #    real. Antes esto era una implementación paralela que aplicaba los
+        #    segmentos y las reglas por opción mientras producción no lo hacía,
+        #    de modo que lo simulado y lo calculado no coincidían (F14-F18).
+        preguntas = [q for sec in form.sections for q in sec.questions]
 
-        # 2. Run Scoring Engine
+        # La simulación indexa las respuestas por data_key; el motor trabaja
+        # por question_id.
+        por_data_key = {q.data_key: q for q in preguntas if q.data_key}
+        raw_answers = {}
+        desconocidas = []
+        for clave, valor in sim_data.answers.items():
+            pregunta = por_data_key.get(clave)
+            if pregunta is None:
+                desconocidas.append(clave)
+                continue
+            raw_answers[pregunta.question_id] = valor
+
+        if desconocidas:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Unknown data_keys for this form: {sorted(desconocidas)}",
+            )
+
         engine = ScoringEngine()
-        # Convert UUIDs to strings for the engine
-        target_ids_str = [str(t) for t in (sim_data.target_ids or [])]
-        scores, alert_results = engine.process_rules(form.scoring_rules, resolved_context, user_target_ids=target_ids_str)
-        
-        # 3. Format Response
-        return SimulationResponse(
-            scores=scores,
-            alerts=[f"[{a.level.upper()}] {a.message}" for a in alert_results]
+        resultado = engine.score_submission(
+            preguntas,
+            form.scoring_rules,
+            raw_answers,
+            user_target_ids=[str(t) for t in (sim_data.target_ids or [])],
         )
+
+        return SimulationResponse(
+            scores=resultado.values,
+            alerts=[f"[{a.level.upper()}] {a.message}" for a in resultado.alerts],
+            total_score=resultado.total_score,
+            uncomputed=resultado.uncomputed,
+            interpretation=resultado.interpretation,
+            interpretation_is_provisional=resultado.interpretation_is_provisional,
+            answer_scores={
+                a.data_key: a.score for a in resultado.answer_scores if a.data_key
+            },
+        )
+
     except Exception as e:
         import traceback
         print(f"SIMULATION ERROR: {e}\n{traceback.format_exc()}")

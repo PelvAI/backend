@@ -3,12 +3,12 @@ from typing import List, Optional
 from datetime import datetime
 from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 from app.db.session import get_db
 from app.models.clinical import (
     ClinicalForm, UserSubmission, SubmissionAnswer, FormSection, FormQuestion,
-    TargetType, FormStatus, ScoringRule, ClinicalAlert, AlertType, ScoreMode, Target
+    ScoringRule, ClinicalAlert, FormStatus, Target
 )
 from app.models.user import User
 from app.schemas.clinical import FormResponse, SubmissionCreate, SubmissionResponse, SubmissionUpdate, ClinicalSnapshotResponse
@@ -17,8 +17,41 @@ from app.services.recommendations import RecommendationService, GamificationServ
 from app.api import deps
 
 from app.services.automation import TagAutomationService
+from app.services.scheduling import (
+    Disponibilidad,
+    calcular_disponibilidad,
+    es_bloqueante,
+)
 
 router = APIRouter()
+
+
+async def _get_own_submission(
+    db: AsyncSession,
+    sub_id: UUID,
+    current_user: User,
+    *,
+    cargar_respuestas: bool = False,
+) -> UserSubmission:
+    """
+    Trae una evaluación comprobando que sea de quien la pide.
+
+    Ni guardar respuestas ni cerrar comparaban contra la usuaria autenticada,
+    así que con el identificador de una evaluación ajena se la podía completar
+    y cerrar (F21). Responde 404 y no 403 a propósito: un 403 confirmaría que
+    esa evaluación existe.
+    """
+    query = select(UserSubmission).where(UserSubmission.submission_id == sub_id)
+    if cargar_respuestas:
+        query = query.options(selectinload(UserSubmission.answers))
+
+    result = await db.execute(query)
+    submission = result.scalars().first()
+
+    if not submission or submission.user_id != current_user.user_id:
+        raise HTTPException(status_code=404, detail="Submission not found")
+
+    return submission
 
 @router.get("/forms", response_model=List[FormResponse])
 async def list_forms(
@@ -39,17 +72,23 @@ async def list_forms(
     # 2. Build query
     query = select(ClinicalForm).options(
         selectinload(ClinicalForm.targets),
-        selectinload(ClinicalForm.scoring_rules),
-        selectinload(ClinicalForm.sections)
-        .selectinload(FormSection.questions)
+        selectinload(ClinicalForm.scoring_rules.and_(ScoringRule.is_active == True)),
+        # Ni una sección ni una pregunta archivadas se le vuelven a ofrecer a
+        # nadie.
+        selectinload(ClinicalForm.sections.and_(FormSection.is_active == True))
+        .selectinload(FormSection.questions.and_(FormQuestion.is_active == True))
         .selectinload(FormQuestion.options)
     ).where(
-        ClinicalForm.is_active == True
+        ClinicalForm.is_active == True,
+        # Sólo lo publicado llega a la usuaria. Antes se filtraba únicamente por
+        # is_active, de modo que un borrador a medio escribir quedaba visible
+        # apenas se creaba y el acto de publicar no existía (F2).
+        ClinicalForm.status == FormStatus.ACTIVE,
     )
-    
+
     # 3. Apply Filtering
     from sqlalchemy import or_
-    
+
     # Always allow forms with "todas" target (case-insensitive) OR forms with NO targets assigned
     filter_conditions = [
         ClinicalForm.targets.any(Target.code.ilike("todas")),
@@ -69,7 +108,55 @@ async def list_forms(
     result = await db.execute(query)
     # Remove duplicates from join if any
     forms = result.scalars().unique().all()
-    return forms
+
+    # Última vez que esta mujer cerró cada cuestionario. Una sola consulta para
+    # todos, no una por formulario.
+    completadas = await db.execute(
+        select(
+            UserSubmission.form_id,
+            func.max(UserSubmission.completed_at),
+        )
+        .where(
+            UserSubmission.user_id == current_user.user_id,
+            UserSubmission.completed_at.isnot(None),
+        )
+        .group_by(UserSubmission.form_id)
+    )
+    ultima_por_forma = {fid: fecha for fid, fecha in completadas.all()}
+
+    ahora = datetime.utcnow()
+    alta = current_user.created_at
+
+    visibles = []
+    for form in forms:
+        estado, proxima = calcular_disponibilidad(
+            form.frecuencia,
+            form.disparador,
+            ultima_por_forma.get(form.form_id),
+            alta,
+            ahora,
+        )
+
+        # Los manuales no se ofrecen solos: se llega a ellos por enlace directo.
+        if estado == Disponibilidad.MANUAL:
+            continue
+
+        form.availability = estado.value
+        form.last_completed_at = ultima_por_forma.get(form.form_id)
+        form.next_available_at = proxima
+        form.is_blocking = es_bloqueante(form.disparador, estado)
+        visibles.append(form)
+
+    # Lo bloqueante primero, después lo disponible, y al final lo que espera.
+    orden = {
+        Disponibilidad.DISPONIBLE.value: 0,
+        Disponibilidad.EN_ESPERA.value: 1,
+        Disponibilidad.PROXIMAMENTE.value: 2,
+        Disponibilidad.COMPLETADO.value: 3,
+    }
+    visibles.sort(key=lambda f: (not f.is_blocking, orden.get(f.availability, 9), f.code))
+
+    return visibles
 
 @router.get("/forms/{code}/schema", response_model=FormResponse)
 async def get_form_schema(
@@ -84,13 +171,16 @@ async def get_form_schema(
         select(ClinicalForm)
         .options(
             selectinload(ClinicalForm.targets),
-            selectinload(ClinicalForm.scoring_rules),
-            selectinload(ClinicalForm.sections)
-            .selectinload(FormSection.questions)
+            selectinload(ClinicalForm.scoring_rules.and_(ScoringRule.is_active == True)),
+            selectinload(ClinicalForm.sections.and_(FormSection.is_active == True))
+            .selectinload(FormSection.questions.and_(FormQuestion.is_active == True))
             .selectinload(FormQuestion.options)
         )
         .where(ClinicalForm.code == code)
         .where(ClinicalForm.is_active == True)
+        # Mismo criterio que el listado: un borrador no debe poder abrirse
+        # adivinando su código.
+        .where(ClinicalForm.status == FormStatus.ACTIVE)
     )
     form = result.scalars().first()
     if not form:
@@ -108,9 +198,16 @@ async def start_submission(
     """
     Start a new empty submission.
     """
+    form = await db.get(ClinicalForm, submission_in.form_id)
+    if not form or not form.is_active:
+        raise HTTPException(status_code=404, detail="Form not found")
+
     submission = UserSubmission(
         user_id=current_user.user_id,
-        form_id=submission_in.form_id
+        form_id=submission_in.form_id,
+        # Deja registrado bajo qué versión del formulario se respondió. La
+        # columna existía para esto y nunca se escribía (F11).
+        form_version=form.version,
     )
     db.add(submission)
     await db.commit()
@@ -127,21 +224,37 @@ async def save_answers(
     """
     Save partial answers (Draft mode).
     """
-    result = await db.execute(select(UserSubmission).where(UserSubmission.submission_id == sub_id))
-    submission = result.scalars().first()
-    if not submission:
-        raise HTTPException(status_code=404, detail="Submission not found")
-    
-    # Clear old answers for simplicity in this stub, or update/upsert
-    # For MVP, we'll just add new ones (ignoring duplicates logic for now)
-    for answer_in in update_in.answers:
-        answer = SubmissionAnswer(
-            submission_id=submission.submission_id,
-            question_id=answer_in.question_id,
-            value=answer_in.value
+    submission = await _get_own_submission(db, sub_id, current_user)
+
+    if submission.completed_at:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Submission already finalized",
         )
-        db.add(answer)
-    
+
+    # Una pregunta tiene una sola respuesta por evaluación: corregirla
+    # reemplaza la anterior. Antes cada guardado insertaba una fila nueva y el
+    # puntaje pasaba a depender del orden del iterado (F20).
+    existentes = await db.execute(
+        select(SubmissionAnswer).where(
+            SubmissionAnswer.submission_id == submission.submission_id
+        )
+    )
+    por_pregunta = {a.question_id: a for a in existentes.scalars().all()}
+
+    for answer_in in update_in.answers:
+        previa = por_pregunta.get(answer_in.question_id)
+        if previa is not None:
+            previa.value = answer_in.value
+        else:
+            nueva = SubmissionAnswer(
+                submission_id=submission.submission_id,
+                question_id=answer_in.question_id,
+                value=answer_in.value,
+            )
+            db.add(nueva)
+            por_pregunta[answer_in.question_id] = nueva
+
     await db.commit()
     await db.refresh(submission)
     return submission
@@ -155,22 +268,19 @@ async def finalize_submission(
     """
     Finalize submission and trigger scoring.
     """
-    # Load Submission with Answers
-    result = await db.execute(
-        select(UserSubmission)
-        .where(UserSubmission.submission_id == sub_id)
-        .options(selectinload(UserSubmission.answers))
+    submission = await _get_own_submission(
+        db, sub_id, current_user, cargar_respuestas=True
     )
-    submission = result.scalars().first()
-    if not submission:
-        raise HTTPException(status_code=404, detail="Submission not found")
         
     # Load Form with Rules and Questions (to map answers)
     form_res = await db.execute(
         select(ClinicalForm)
         .where(ClinicalForm.form_id == submission.form_id)
         .options(
-            selectinload(ClinicalForm.scoring_rules),
+            selectinload(ClinicalForm.scoring_rules.and_(ScoringRule.is_active == True)),
+            # Las preguntas NO se filtran por is_active acá a propósito: lo que
+            # manda es qué respondió la mujer. Archivar una pregunta después de
+            # que alguien la contestó no debe cambiarle el puntaje al recalcular.
             selectinload(ClinicalForm.sections)
             .selectinload(FormSection.questions)
             .selectinload(FormQuestion.options)
@@ -180,77 +290,48 @@ async def finalize_submission(
     if not form:
         raise HTTPException(status_code=404, detail="Form definition not found")
 
-    # 1. Resolve Scores for Answers and Build Context
-    questions_map = {}
-    for section in form.sections:
-        for q in section.questions:
-            questions_map[q.question_id] = q
-            
-    resolved_context = {}
-    
-    for ans in submission.answers:
-        q = questions_map.get(ans.question_id)
-        if not q:
-            continue
-            
-        # Calc score for this answer
-        resolved_score = 0
-        raw_val = ans.value
-        
-        if q.score_mode == ScoreMode.OPTION_SCORE and q.options:
-            for opt in q.options:
-                # Compare as strings to be safe
-                if str(opt.value) == str(raw_val):
-                    resolved_score = opt.score
-                    break
-        elif q.score_mode == ScoreMode.VALUE_AS_SCORE:
-            try:
-                resolved_score = float(raw_val)
-            except:
-                resolved_score = 0
-        
-        # Update Answer Row
-        ans.score = int(resolved_score) # assuming integer col? It is Integer.
-        
-        # Update Context for Engine (if it has data_key)
-        if q.data_key:
-            resolved_context[q.data_key] = resolved_score
+    # 1. Los segmentos clínicos de la usuaria entran al motor: sin ellos, toda
+    #    regla y toda opción con condición de segmento se descarta (F15, F16).
+    user_target_ids = []
+    if current_user.profile:
+        # Sin commit: todo el cierre confirma de una sola vez al final (F36).
+        await TagAutomationService.sync_profile_tags(
+            db, current_user.profile.profile_id, commit=False
+        )
+        await db.refresh(current_user.profile, ["targets"])
+        user_target_ids = [str(t.target_id) for t in current_user.profile.targets]
 
-    # 2. Run Scoring Engine
+    questions = [q for section in form.sections for q in section.questions]
+    raw_answers = {ans.question_id: ans.value for ans in submission.answers}
+
+    # 2. Camino único, el mismo que ejecuta el simulador del panel.
     engine = ScoringEngine()
-    scores, alert_results = engine.process_rules(form.scoring_rules, resolved_context)
-    
-    # 3. Save Calculated Values
-    submission.total_score = scores.get('total_score') or scores.get('iciq_total') or 0 # Heuristic or define strict rule
-    # For ICIQ-SF specifically, we used 'iciq_total'. 
-    # General solution: store ALL scores in calculated_values
-    submission.calculated_values = scores
-    
-    # Update total_score strictly if there is a 'total' key, or first value?
-    # Let's try to find a key ending in '_total' or just use first.
-    if scores:
-        # Check rule mapping variable_name to see which is 'main'.
-        # For now, just Dump JSON. Mobile can parse.
-        # But UserSubmission has 'total_score' Float column.
-        # Let's pick 'iciq_total' if exists.
-        if 'iciq_total' in scores:
-            submission.total_score = scores['iciq_total']
-        elif 'total_score' in scores:
-             submission.total_score = scores['total_score']
-    
+    resultado = engine.score_submission(
+        questions, form.scoring_rules, raw_answers, user_target_ids=user_target_ids
+    )
+
+    # 3. Persistir el puntaje de cada respuesta
+    puntajes = {a.question_id: a.score for a in resultado.answer_scores}
+    for ans in submission.answers:
+        if ans.question_id in puntajes:
+            ans.score = int(puntajes[ans.question_id])
+
+    # 4. Guardar el resultado. calculated_values conserva su forma anterior a
+    #    propósito: es el contexto que RecommendationService usa para asignar
+    #    planes de entrenamiento.
+    submission.calculated_values = resultado.values
+    submission.total_score = resultado.total_score
+    submission.score_interpretation = resultado.interpretation
     submission.completed_at = datetime.utcnow()
-    
-    # 4. Create Clinical Alerts (Persist)
-    for res in alert_results:
-        # Check if alert already exists? (Maybe retrying finalization)
-        # For MVP, just add.
+
+    # 5. Create Clinical Alerts (Persist)
+    for res in resultado.alerts:
         alert = ClinicalAlert(
             user_id=current_user.user_id,
             submission_id=submission.submission_id,
-            rule_id=UUID(res.rule_id), # AlertResult stores str, convert to UUID
-            alert_type=res.alert_type, # Enum value matching
-            triggered_value=0, # We didn't capture WHAT value triggered it easily in AlertResult yet. 
-            # (TODO: Add triggered_value to AlertResult in scoring logic later)
+            rule_id=UUID(res.rule_id) if res.rule_id else None,
+            alert_type=res.alert_type,
+            triggered_value=res.triggered_value,
             is_shown_to_user=True # Default
         )
         db.add(alert)

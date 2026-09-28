@@ -6,7 +6,7 @@ This module defines the database models for the clinical questionnaire system,
 supporting dynamic form creation, conditional logic, weighted scoring, and alerts.
 """
 
-from sqlalchemy import Column, String, Boolean, DateTime, ForeignKey, Enum, Integer, Text, Float
+from sqlalchemy import Column, String, Boolean, DateTime, ForeignKey, Enum, Integer, Text, Float, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import relationship
 from app.db.session import Base
@@ -194,6 +194,10 @@ class FormSection(Base):
     title_key = Column(String)  # Translation key
     bloque = Column(String)  # Clinical category grouping (e.g., "CONTROL_Y_CONTINENCIA")
     order_index = Column(Integer, default=0)
+
+    # Igual que preguntas y reglas: si tiene preguntas ya respondidas se
+    # archiva, porque destruirla se llevaría evidencia clínica por delante.
+    is_active = Column(Boolean, default=True, nullable=False, server_default="true")
     
     # Relationships
     form = relationship("ClinicalForm", back_populates="sections")
@@ -235,6 +239,10 @@ class FormQuestion(Base):
     
     # Legacy config (for backwards compatibility)
     config = Column(JSONB)
+
+    # Archivar en lugar de destruir: una pregunta ya respondida es evidencia
+    # clínica, y borrarla además rompía con una violación de clave foránea.
+    is_active = Column(Boolean, default=True, nullable=False, server_default="true")
     
     order_index = Column(Integer, default=0)
     
@@ -287,6 +295,19 @@ class ScoringRule(Base):
     
     # Interpretation ranges (optional)
     interpretation_ranges = Column(JSONB)  # e.g., {"0-5": "Leve", "6-10": "Moderado", ">10": "Severo"}
+
+    # Marca cuál de las reglas del formulario produce el puntaje total. Antes
+    # se adivinaba por el nombre de la variable, así que cualquier cuestionario
+    # que no se llamara como el ICIQ quedaba en cero sin avisar (F17).
+    is_total = Column(Boolean, default=False, nullable=False, server_default="false")
+
+    # Si la clínica validó los rangos de interpretación. Nace en falso: marcar
+    # algo como validado tiene que ser un acto deliberado de quien puede
+    # hacerlo. Lo provisorio se muestra con su advertencia, pero no alimenta
+    # decisiones clínicas automáticas.
+    interpretation_validated = Column(
+        Boolean, default=False, nullable=False, server_default="false"
+    )
     
     # Alert configuration
     alert_condition = Column(Text)  # e.g., "value >= 10"
@@ -294,6 +315,10 @@ class ScoringRule(Base):
     
     # Context-Aware Scoring (Phase 10)
     target_id = Column(UUID(as_uuid=True), ForeignKey("targets.target_id", ondelete="SET NULL"), nullable=True)
+
+    # Igual que en las preguntas: una regla que ya disparó alertas clínicas se
+    # archiva, no se destruye.
+    is_active = Column(Boolean, default=True, nullable=False, server_default="true")
     
     order_index = Column(Integer, default=0)
     
@@ -313,7 +338,9 @@ class ClinicalAlert(Base):
     alert_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.user_id"), nullable=False)
     submission_id = Column(UUID(as_uuid=True), ForeignKey("user_submissions.submission_id"), nullable=False)
-    rule_id = Column(UUID(as_uuid=True), ForeignKey("scoring_rules.rule_id"), nullable=False)
+    # Nulo cuando la alerta viene de la regla contextual de una opción, que no
+    # está asociada a ninguna ScoringRule.
+    rule_id = Column(UUID(as_uuid=True), ForeignKey("scoring_rules.rule_id"), nullable=True)
     
     alert_type = Column(Enum(AlertType), nullable=False)
     triggered_value = Column(Float)  # The value that triggered the alert
@@ -369,6 +396,15 @@ class SubmissionAnswer(Base):
     Stores both the raw value and calculated score.
     """
     __tablename__ = "submission_answers"
+    # Una pregunta tiene una sola respuesta por evaluación. Antes guardar el
+    # borrador insertaba una fila nueva cada vez y el puntaje pasaba a depender
+    # del orden del iterado (F20).
+    __table_args__ = (
+        UniqueConstraint(
+            "submission_id", "question_id",
+            name="uq_submission_answers_submission_question",
+        ),
+    )
     
     answer_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     submission_id = Column(UUID(as_uuid=True), ForeignKey("user_submissions.submission_id", ondelete="CASCADE"), nullable=False)
